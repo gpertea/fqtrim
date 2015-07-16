@@ -39,4 +39,4 @@ echo "tar cvfz $linpack.tar.gz $linpack"
 tar cvfz $linpack.tar.gz $linpack
 echo "On igmX machines you can also update the web files:"
 echo "cp $linpack.tar.gz $src.tar.gz  ~/html/software/fqtrim/dl/"
-echo "perl -i -pe 's/fqtrim-[0-9]+\.\d+\./fqtrim-$ver./g' ~/html/software/fqtrim/index.shtml"
+echo "perl -i -pe 's/fqtrim-[\d\.]+/fqtrim-$ver./g' ~/html/software/fqtrim/index.shtml"

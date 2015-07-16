@@ -1,3 +1,4 @@
+#define VERSION "0.9.4"
 #include "GArgs.h"
 #include "GStr.h"
 #include "GHash.hh"
@@ -10,7 +11,7 @@
 
 #include "time.h"
 #include "sys/time.h"
-#define VERSION "0.94"
+
 //uncomment this to show DBGPRINT messages
 //#define DEBUGPRINT 1
 #ifdef DEBUGPRINT
