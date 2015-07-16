@@ -1,0 +1,59 @@
+This document provides basic installation and operation instructions for 
+fqtrim, a software utility for trimming and processing short DNA sequences
+in FASTA or FASTQ format.
+
+1.Installation
+
+If you downloaded the binary package simply unpack and copy the fqtrim 
+executable in a directory of your choice.
+
+If you downloaded the source package, just unpack and run the 'make release'
+command to build the fqtrim executable:
+
+    tar xvfz fqtrim-N.NN.tar.gz
+    cd fqtrim-N.NN
+    make release
+
+2. Notes
+
+2.1 Adapter file format
+
+The -f option expects a text file with the adapter sequences to be trimmed from the ends
+of the reads. This file has a loose 2-column format, where columns are delimited by tab, space, 
+comma, colon or semicolon characters ('\t', ' ', ';', ':' or ','). Adapter sequences to be trimmed
+from the 5' end should be given in the first column, while the 3' end adapters are in the 2nd 
+column. If only the 3' adapters are to be trimmed, the corresponding line should start 
+with one of delimiter characters mentioned above. 
+
+Example 1: 
+If we want to trim the adapter sequence CGACAGGTTCAGAGTTCTACAGTCCGACGATC from the left (5') 
+end of the reads and the sequence TCGTATGCCGTCTTCTGCTTG from the 3' end, the file would 
+have a line like this:
+
+CGACAGGTTCAGAGTTCTACAGTCCGACGATC TCGTATGCCGTCTTCTGCTTG
+
+There is no relationship assumed between 5' and 3' adapter sequences if they are provided 
+on the same line. The line above is equivalent to using 2 lines, one for each adapter sequence:
+
+CGACAGGTTCAGAGTTCTACAGTCCGACGATC,
+ TCGTATGCCGTCTTCTGCTTG
+
+Note the space at the beginning of the line providing the 3' end adapter 
+and the comma at the end of the first line. 
+If, on the other hand, there were no delimiter at the end of the line, e.g.:
+
+CGACAGGTTCAGAGTTCTACAGTCCGACGATC
+,TCGTATGCCGTCTTCTGCTTG
+
+..then the sequence on that line would be searched for at *both* ends of a read
+(both 5' and 3'), while the sequence on the 2nd line in this case would only be 
+searched at the 3' end, like before.
+
+Example2: 
+If only 3' adapter should be trimmed (e.g. the one from Example 1), 
+the adapter file should have a line like this, starting with a delimiter character:
+
+,TCGTATGCCGTCTTCTGCTTG
+
+
+
