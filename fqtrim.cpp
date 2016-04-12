@@ -2075,11 +2075,12 @@ void setupFiles(FILE*& f_in, FILE*& f_in2, FILE*& f_out, FILE*& f_out2,
 
 #ifndef NOTHREADS
 void workerThread(GThreadData& td) {
- RInfo* rinfo=(RInfo*)td.udata;
- CTrimHandler* trimmer=new CTrimHandler(rinfo);
- while (trimmer->processRead());
+ //RInfo* rinfo=(RInfo*)td.udata;
+ //CTrimHandler* trimmer=new CTrimHandler(rinfo);
+ CTrimHandler trimmer((RInfo*)td.udata);
+ while (trimmer.processRead());
  statsMutex.lock();
-	trimmer->updateCounts();
+ trimmer.updateCounts();
  statsMutex.unlock();
 }
 #endif
