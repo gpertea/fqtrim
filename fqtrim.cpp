@@ -52,7 +52,7 @@ Options:\n\
     NOTE: if the input file is '-' (stdin) then this is the full name of the\n\
     output file, not just the suffix.\n\
 -f  file with adapter sequences to trim, each line having this format:\n\
-    [<5'-adapter-sequence>][ <3'-adapter-sequence>]\n\
+    [<5_adapter_sequence>][ <3_adapter_sequence>]\n\
 -5  trim the given adapter or primer sequence at the 5' end of each read\n\
     (e.g. -5 CGACAGGTTCAGAGTTCTACAGTCCGACGATC)\n\
 -3  trim the given adapter sequence at the 3' end of each read\n\
@@ -71,8 +71,11 @@ Options:\n\
     of trimming operations\n\
 -T  write the number of bases trimmed at 5' and 3' ends after the read names\n\
     in the FASTA/FASTQ output file(s)\n\
--D  apply a low-complexity (dust) filter and discard any read that has over\n\
-    50% of its length detected as low complexity\n\
+-D  pass reads through a low-complexity (dust) filter and discard any read\n\
+    that has over 50% of its length masked as low complexity\n\
+--dmask option is the same with -D but fqtrim will actually mask the low \n\
+    complexity regions with Ns in the output sequence\n\
+    of low-complexity sequence detected in the reads\n\
 -C  collapse duplicate reads and append a _x<N>count suffix to the read\n\
     name (where <N> is the duplication count)\n\
 -p  use <numcpus> CPUs (threads) on the local machine\n\
@@ -118,12 +121,13 @@ bool trimInfo=false; //trim info added to the output reads
 bool polyBothEnds=false; //attempt poly-A/T trimming at both ends
 bool onlyTrimmed=false; //report only trimmed reads
 bool show_Trim=false;
+bool dustMask=false;
 bool pairedOutput=false;
 bool revCompl=false; //also reverse complement adapter sequences
 bool disableMateNameCheck=false;
 int min_read_len=16;
 int num_cpus=1; // -p option
-int readBufSize=128; //how many reads to fetch at a time (useful for multi-threading)
+int readBufSize=200; //how many reads to fetch at a time (useful for multi-threading)
 
 double max_perc_N=5.0;
 double perc_lenN=12.0; // incremental distance from ends, in percentage of read length
@@ -446,7 +450,7 @@ void workerThread(GThreadData& td); // Thread function
 
 
 int main(int argc, char * const argv[]) {
-  GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:P:q:f:w:t:o:z:a:y:");
+  GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=dmask:showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:P:q:f:w:t:o:z:a:y:");
   int e;
   if ((e=args.isError())>0) {
       GMessage("%s\nInvalid argument: %s\n", USAGE, argv[e]);
@@ -461,6 +465,8 @@ int main(int argc, char * const argv[]) {
   polyBothEnds=(args.getOpt('B')!=NULL);
   onlyTrimmed=(args.getOpt('O')!=NULL);
   show_Trim=(args.getOpt("showtrim")!=NULL);
+  dustMask=(args.getOpt("dmask")!=NULL);
+  if (dustMask) doDust=true;
   disableMateNameCheck=(args.getOpt('M')!=NULL);
   if (args.getOpt('A')) doPolyTrim=false;
   /*
@@ -1124,6 +1130,7 @@ int dust(GStr& rseq) {
  for (int i=0;i<rseq.length();i++) {
    if (seq[i]=='N') ncount++;
    }
+ if (dustMask) rseq=seq;
  GFREE(seq);
  return ncount;
  }
@@ -1669,7 +1676,7 @@ do {
   int prev_l3=l3;
   int prev_l5=l5;
   trim_code=0;
-  if (ts.w3upd) { 
+  if (ts.w3upd) {
     if (trim_poly3(ts.wseq, ts.w5, ts.w3, polyA_seed)) {
       trim_code='A';
       STrimOp trimop(3, trim_code, (ts.w5+(ts.wseq.length()-1-ts.w3)));
@@ -1829,10 +1836,10 @@ void CTrimHandler::writeRead(RInfo& ri, RData& rd, RData& rd2, int& outcounter) 
 			rd2.qv="B";
 		}
 	}
-	if (ri.f_out && !rd.rid.is_empty()) {
+	if (ri.f_out) {
 		write1Read(ri.f_out, rd, outcounter);
 	}
-	if (ri.f_out2 && !rd2.rid.is_empty())  {
+	if (ri.f_out2)  {
 		write1Read(ri.f_out2, rd2, outcounter);
 	}
 }
@@ -2101,99 +2108,100 @@ void workerThread(GThreadData& td) {
 #endif
 
 bool CTrimHandler::processRead() {
-  //GStr rseq, rqv, seqid, seqinfo;
-  //GStr rseq2, rqv2, seqid2, seqinfo2;
-  RData rd;
-  RData rd2;
-  if (getRead(rd, rd2)) {
-     int a5=0, a3=0, b5=0, b3=0;
-     char tcode=0, tcode2=0;
-     GVec<STrimOp> trimhist;
-     GVec<STrimOp> trimhist2;
-     tcode=process_read(rd.rid, rd.seq, rd.qv, a5, a3, trimhist);
-     //tcode: 0 if the read was not trimmed at all and it's long enough
-     //       1 if it was just trimmed but survived,
-     //       >1 (=trash code character ) if it was trashed for any reason
-     #ifdef TRIMDEBUG
-     if (a5>0 || a3<rd.seq.length()-1) {
-       char tc=(tcode>32)? tcode : ('0'+tcode);
-       GMessage("####> Trim code [%c] ( a5 : a3 = %d : %d ): \n",tc, a5,a3);
-       showTrim(rd.seq, a5, a3);
-       }
-      else {
-       GMessage("####> No trimming for this read.\n");
-       }
-     #endif
-     if (show_Trim) {
-       showTrim(rd.rid, rd.seq, a5, a3, trimhist);
-     }
-     if (tcode>0 && trimReport)
-       trim_report(tcode, rd.rid, trimhist, freport);
-     if (a5>0) {
-        b_trim5+=a5;
-        rd.trim5=a5;
-        num_trim5++;
-        }
-     if (a3<rd.seq.length()-1) {
-        rd.trim3=rd.seq.length()-a3-1;
-        b_trim3+=rd.trim3;
-        num_trim3++;
-        }
-     if (rinfo->fq2!=NULL && !rd2.seq.is_empty()) { //paired
-          //getFastxRec(*fq2, rd2.seq, rd2.qv, rd2.rid, rd2.rinfo, rinfo.infname2);
-          if (!disableMateNameCheck && rd.rid.length()>4 && rd2.rid.length()>=rd.rid.length()) {
-          		if (rd.rid.substr(0,rd.rid.length()-3)!=rd2.rid.substr(0,rd.rid.length()-3)) {
-             GError("Error: no paired match for read %s vs %s (%s,%s)\n",
-                rd.rid.chars(), rd2.rid.chars(), rinfo->infname.chars(), rinfo->infname2.chars());
-             }
-          }
-          tcode2=process_read(rd2.rid, rd2.seq, rd2.qv, b5, b3, trimhist2);
-          if (tcode2>0 && trimReport)
-            trim_report(tcode2, rd2.rid, trimhist2, freport);
-          if (b5>0) {
-             b_trim5+=b5;
-             rd2.trim5=b5;
-             num_trim5++;
-             }
-          if (b3<rd2.seq.length()-1) {
-             rd2.trim3=rd2.seq.length()-b3-1;
-             b_trim3+=rd2.trim3;
-             num_trim3++;
-             }
-          //decide what to do with this pair and print rd2.seq if the pair makes it
-          if (pairedOutput) {
-			  if (tcode>1 && tcode2<=1) {
-				 tcode=1; //pretend read not trashed
-				 }
-			   else if (tcode<=1 && tcode2>1) {
-				 tcode2=1;
-				 }
-			  if (tcode<=1) { //main read is valid -- prepare rd2 for writing
-				   rd2.seq=rd2.seq.substr(b5,b3-b5+1);
-				   if (!rd2.qv.is_empty()) rd2.qv=rd2.qv.substr(b5,b3-b5+1);
-				 }
-          }
-     } //paired
-     if (tcode>1) { //read/pair trashed
-        //must use rinfo mutex here
-        if (tcode=='s') trash_s++;
-        else if (tcode=='A' || tcode=='T') trash_poly++;
-          else if (tcode=='Q') trash_Q++;
-            else if (tcode=='N') trash_N++;
-             else if (tcode=='D') trash_D++;
-              else if (tcode=='V') trash_V++;
-               //else if (tcode=='5') trash_A5++;
-     }
-     else if (!doCollapse) { //write it
-        if (tcode>0) {
-          rd.seq=rd.seq.substr(a5,a3-a5+1);
-          if (!rd.qv.is_empty()) rd.qv=rd.qv.substr(a5,a3-a5+1);
-          }
-        if ((onlyTrimmed && tcode==1) || !onlyTrimmed )
-          writeRead(*rinfo, rd, rd2, outcounter);
-     }
-     return true;
-  } //reading one read (pair)
-  return false;
+	//GStr rseq, rqv, seqid, seqinfo;
+	//GStr rseq2, rqv2, seqid2, seqinfo2;
+	RData rd;
+	RData rd2;
+	if (getRead(rd, rd2)) {
+		int a5=0, a3=0, b5=0, b3=0;
+		char tcode=0, tcode2=0;
+		GVec<STrimOp> trimhist;
+		GVec<STrimOp> trimhist2;
+		tcode=process_read(rd.rid, rd.seq, rd.qv, a5, a3, trimhist);
+		//tcode: 0 if the read was not trimmed at all and it's long enough
+		//       1 if it was just trimmed but survived,
+		//       >1 (=trash code character ) if it was trashed for any reason
+#ifdef TRIMDEBUG
+		if (a5>0 || a3<rd.seq.length()-1) {
+			char tc=(tcode>32)? tcode : ('0'+tcode);
+			GMessage("####> Trim code [%c] ( a5 : a3 = %d : %d ): \n",tc, a5,a3);
+			showTrim(rd.seq, a5, a3);
+		}
+		else {
+			GMessage("####> No trimming for this read.\n");
+		}
+#endif
+		if (show_Trim) {
+			showTrim(rd.rid, rd.seq, a5, a3, trimhist);
+		}
+		if (tcode>0 && trimReport)
+			trim_report(tcode, rd.rid, trimhist, freport);
+		if (a5>0) {
+			b_trim5+=a5;
+			rd.trim5=a5;
+			num_trim5++;
+		}
+		if (a3<rd.seq.length()-1) {
+			rd.trim3=rd.seq.length()-a3-1;
+			b_trim3+=rd.trim3;
+			num_trim3++;
+		}
+		if (rinfo->fq2!=NULL && !rd2.seq.is_empty()) { //paired
+			//getFastxRec(*fq2, rd2.seq, rd2.qv, rd2.rid, rd2.rinfo, rinfo.infname2);
+			if (!disableMateNameCheck && rd.rid.length()>4 && rd2.rid.length()>=rd.rid.length()) {
+				if (rd.rid.substr(0,rd.rid.length()-3)!=rd2.rid.substr(0,rd.rid.length()-3)) {
+					GError("Error: no paired match for read %s vs %s (%s,%s)\n",
+							rd.rid.chars(), rd2.rid.chars(), rinfo->infname.chars(), rinfo->infname2.chars());
+				}
+			}
+			tcode2=process_read(rd2.rid, rd2.seq, rd2.qv, b5, b3, trimhist2);
+			if (tcode2>0 && trimReport)
+				trim_report(tcode2, rd2.rid, trimhist2, freport);
+			if (b5>0) {
+				b_trim5+=b5;
+				rd2.trim5=b5;
+				num_trim5++;
+			}
+			if (b3<rd2.seq.length()-1) {
+				rd2.trim3=rd2.seq.length()-b3-1;
+				b_trim3+=rd2.trim3;
+				num_trim3++;
+			}
+			//decide what to do with this pair and print rd2.seq if any read in the pair makes it
+			if (pairedOutput) {
+				if (tcode>1 && tcode2<=1) {
+					tcode=1; //pretend read was not trashed
+				}
+				else if (tcode<=1 && tcode2>1) {
+					tcode2=1;
+				}
+				if (tcode<=1) { //main read is valid -- prepare rd2 for writing
+					rd2.seq=rd2.seq.substr(b5,b3-b5+1);
+					if (!rd2.qv.is_empty()) rd2.qv=rd2.qv.substr(b5,b3-b5+1);
+				}
+			}
+		} //paired
+		if (tcode>1) { //read/pair trashed
+			//must use rinfo mutex here
+			if (tcode=='s') trash_s++;
+			else if (tcode=='A' || tcode=='T') trash_poly++;
+			else if (tcode=='Q') trash_Q++;
+			else if (tcode=='N') trash_N++;
+			else if (tcode=='D') trash_D++;
+			else if (tcode=='V') trash_V++;
+			//else if (tcode=='5') trash_A5++;
+		}
+		else if (!doCollapse) {
+			//write read/pair
+			if (tcode>0) {
+				rd.seq=rd.seq.substr(a5,a3-a5+1);
+				if (!rd.qv.is_empty()) rd.qv=rd.qv.substr(a5,a3-a5+1);
+			}
+			if ((onlyTrimmed && tcode==1) || !onlyTrimmed )
+				writeRead(*rinfo, rd, rd2, outcounter);
+		}
+		return true;
+	} //reading one read (pair)
+	return false;
 }
 
