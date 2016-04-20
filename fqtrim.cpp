@@ -219,10 +219,14 @@ struct RData {
 	GStr qv;
 	GStr rid;
 	GStr rinfo;
+	GVec<STrimOp> trimhist;
 	int trim5;
 	int trim3;
-	RData():seq(),qv(),rid(),rinfo(), trim5(0), trim3(0) {}
-	void clear() { seq="";qv="";rid="";rinfo=""; trim5=0; trim3=0; }
+	char trashcode;
+	int l3() { return seq.length()-trim3-1; }
+	RData():seq(),qv(),rid(),rinfo(), trimhist(), trim5(0), trim3(0), trashcode(0) {}
+	void clear() { seq="";qv="";rid="";rinfo=""; trimhist.Clear();
+	               trim5=0; trim3=0; trashcode(0); }
 };
 
 struct RInfo {
@@ -319,9 +323,9 @@ class FqDupRec {
 struct CTrimHandler {
 	CGreedyAlignData* gxmem_l;
 	CGreedyAlignData* gxmem_r;
-	GVec<RData> rbuf;   //reading buffer
+	GVec<RData> rbuf;   //read buffer
 	int rbuf_p; //index of next read unprocessed from the reading buffer
-	GVec<RData> rbuf2;  //mate reading buffer
+	GVec<RData> rbuf2;  //mate read buffer
 	int rbuf2_p;
 	RInfo* rinfo;
 	int incounter;
@@ -349,9 +353,10 @@ struct CTrimHandler {
         gxmem_l=new CGreedyAlignData(match_reward, mismatch_penalty, Xdrop);
       if (adapters3.Count()>0)
         gxmem_r=new CGreedyAlignData(match_reward, mismatch_penalty, Xdrop);
-      rbuf.Resize(readBufSize);
+      //rbuf.Resize(readBufSize);
       if (ri && ri->fq2) {
-        rbuf2.Resize(readBufSize);
+        //rbuf2.Resize(readBufSize);
+    	  rbuf2.setCapacity(readBufSize);
       }
 	}
 
@@ -395,7 +400,7 @@ struct CTrimHandler {
 
 	bool processRead();
 
-	char process_read(GStr& rname, GStr& rseq, GStr& rqv, int &l5, int &l3, GVec<STrimOp>& thist);
+	char process_read(RData& r);
 	//returns 0 if the read was untouched, 1 if it was trimmed and a trash code if it was trashed
 
 	bool ntrim(GStr& rseq, int &l5, int &l3, double& pN); //returns true if any trimming occured
@@ -1476,44 +1481,46 @@ bool getFastxRead(GLineReader& fq, RData& rd, GStr& infname) {
 }
 
 bool getBufRead(GVec<RData>& rbuf, int& rbuf_p, GLineReader* fq, GStr& infname, RData& rdata) {
-  rdata.clear();
-  if (rbuf_p<=0) {
-  	rbuf_p=0;
-  	if (fq->isEof()) return false;
-  	//load chunk of reads
-  	while(!fq->isEof() && rbuf_p<readBufSize) {
-  		if (!getFastxRead(*(fq), rdata, infname)) break;
-  		//rbuf.Push(rdata);
-  		rbuf[rbuf_p]=rdata;
-  		++rbuf_p;
-  	}
-  	if (rbuf_p==0) return false;
-  	if (rbuf_p<rbuf.Count()) rbuf.setCount(rbuf_p);
-  }
-  //retrieve one read from read buffer
-  rdata=rbuf[rbuf.Count()-rbuf_p];
-  rbuf_p--;
-  return true;
+	rdata.clear();
+	if (rbuf_p<=0) { //load next chunk of reads
+		rbuf_p=0;
+		if (fq->isEof()) return false;
+		{
+#ifndef NOTHREADS
+			GLockGuard<GFastMutex> guard(readMutex);
+#endif
+			while(!fq->isEof() && rbuf_p<readBufSize) {
+				if (!getFastxRead(*(fq), rdata, infname)) break;
+				rbuf.Push(rdata);
+				//rbuf[rbuf_p]=rdata;
+				++rbuf_p;
+			}
+		}
+		if (rbuf_p==0) return false;
+		//if (rbuf_p<rbuf.Count()) rbuf.setCount(rbuf_p);
+		GASSERT( rbuf_p==rbuf.Count() );
+	} //read next chunk of reads
+	//next unprocessed read from read buffer
+	rdata=rbuf[rbuf.Count()-rbuf_p];
+	rbuf_p--;
+	return true;
 }
 
 bool CTrimHandler::getRead(RData& rdata, RData& rdata2) {
 		//GLineReader& fq, GStr& rseq, GStr& rqv,
     //      GStr& rname, GStr& rinfo, GStr& infname) {
-#ifndef NOTHREADS
-	GLockGuard<GFastMutex> guard(readMutex);
-#endif
-	if (!getBufRead(rbuf, rbuf_p, rinfo->fq, rinfo->infname, rdata)) return false;
+  if (!getBufRead(rbuf, rbuf_p, rinfo->fq, rinfo->infname, rdata)) return false;
   incounter++;
   if (rinfo->fq2==NULL) return true;
   getBufRead(rbuf2, rbuf2_p, rinfo->fq2, rinfo->infname2, rdata2);
   return true;
 }
 
-void showTrim(GStr& s, int l5, int l3) {
-  if (l5>0 || l3==0) {
+void showTrim(RData& r) {
+  if (r.trim5>0 || r.l3()==0) {
     color_bg(c_red);
     }
-  for (int i=0;i<s.length()-1;i++) {
+  for (int i=0;i<r.seq.length()-1;i++) {
     if (i && i==l5) color_resetbg();
     fprintf(stderr, "%c", s[i]);
     if (i && i==l3) color_bg(c_red);
@@ -1558,12 +1565,9 @@ struct STrimState {
      wseq(rseq.chars()), wqv(rqv.chars()), w3upd(true), w5upd(true), wupd(true) {
  }
 
- char update(char trim_code, int& l5, int& l3) {
-   l5+=w5;
-   l3-=(wseq.length()-1-w3);
-   if (w3-w5+1<min_read_len) {
-       return trim_code; //return last operation code as "trash code"
-   }
+ char update(char trim_code, int& trim5, int& trim3) {
+   trim5+=w5;
+   trim3+=(wseq.length()-1-w3);
  #ifdef TRIMDEBUG
    GMessage("#### TRIM by '%c' code ( w5-w3 = %d-%d ):\n",trim_code, w5,w3);
    showTrim(wseq, w5, w3);
@@ -1572,7 +1576,9 @@ struct STrimState {
    wseq=wseq.substr(w5, w3-w5+1);
    if (!wqv.is_empty())
       wqv=wqv.substr(w5, w3-w5+1);
-   
+   if (w3-w5+1<min_read_len) {
+       return trim_code; //return last operation code as "trash code"
+   }
    w5=0;
    w3=wseq.length()-1;
    return 0;
@@ -1580,32 +1586,31 @@ struct STrimState {
  
 };
 
-char CTrimHandler::process_read(GStr& rname, GStr& rseq, GStr& rqv, int &l5, int &l3,
-	        GVec<STrimOp>& t_hist) {
+char CTrimHandler::process_read (RData &r) {
+//(GStr& rname, GStr& rseq, GStr& rqv, int &l5, int &l3,
+//	        GVec<STrimOp>& t_hist) {
  //returns 0 if the read was untouched, 1 if it was just trimmed
  // and a trash code if it was trashed
- l5=0;
- l3=rseq.length()-1;
  #ifdef TRIMDEBUG
    GMessage(">%s\n", rname.chars());
    GMessage("%s\n",rseq.chars());
  #endif
- if (l3-l5+1<min_read_len) {
+ if (r.seq.length()-r.trim5-r.trim3<min_read_len) {
    return 's'; //too short already
    }
 //count Ns
-b_totalIn+=rseq.length();
-for (int i=0;i<rseq.length();i++) {
- if (isACGT[(int)rseq[i]]==0) b_totalN++;
+b_totalIn+=r.seq.length();
+for (int i=0;i<r.seq.length();i++) {
+ if (isACGT[(int)r.seq[i]]==0) b_totalN++;
  }
 double percN=0;
 char trim_code=0;
 
-GStr wseq(rseq.chars());
-GStr wqv(rqv.chars());
+GStr wseq(r.seq.chars());
+GStr wqv(r.qv.chars());
 
-int w5=l5;
-int w3=l3;
+int w5=r.trim5;
+int w3=r.seq.length()-r.trim3-1;
 
 //first do the q-based trimming
 if (qvtrim_qmin!=0 && !wqv.is_empty() && qtrim(wqv, w5, w3)) { // qv-threshold trimming
@@ -1613,27 +1618,27 @@ if (qvtrim_qmin!=0 && !wqv.is_empty() && qtrim(wqv, w5, w3)) { // qv-threshold t
 //   GMessage("\t#### qtrim(): %d-%d : %s\n",w5,w3, wqv.substr(w5, w3-w5+1).chars());
 //   #endif
    trim_code='Q';
-   int t5=(w5-l5);
+   int t5=(w5-r.trim5);
    if (t5>0) {
       STrimOp trimop(5,trim_code,t5);
-      t_hist.Add(trimop);
+      r.trimhist.Add(trimop);
    }
-   int t3=(l3-w3);
+   int t3=(r.l3()-w3);
    if (t3>0) {
       STrimOp trimop(3,trim_code,t3);
-      t_hist.Add(trimop);
+      r.trimhist.Add(trimop);
    }
    b_trimQ+=t5+t3;
    num_trimQ++;
-   l5=w5;
-   l3=w3;
-   if (l3-l5+1<min_read_len) {
+   r.trim5=w5;
+   r.trim3=r.seq.length()-1-w3;
+   if (r.seq.length()-r.trim5-r.trim3<min_read_len) {
      return trim_code; //invalid read
      }
    //-- keep only the w5..w3 range
-   wseq=wseq.substr(l5, l3-l5+1);
+   wseq=wseq.substr(r.trim5, r.seq.length()-r.trim3-r.trim5);
    if (!wqv.is_empty())
-      wqv=wqv.substr(l5, l3-l5+1);
+      wqv=wqv.substr(r.trim5, r.seq.length()-r.trim3-r.trim5);
    } //qv trimming
 // N-trimming on the remaining read seq
 if (ntrim(wseq, w5, w3, percN)) {
@@ -1645,14 +1650,14 @@ if (ntrim(wseq, w5, w3, percN)) {
    num_trimN++;
    if (w5>0) {
       STrimOp trimop(5,trim_code,w5);
-      t_hist.Add(trimop);
+      r.trimhist.Add(trimop);
    }
    if (trim3>0) {
       STrimOp trimop(3,trim_code,trim3);
-      t_hist.Add(trimop);
+      r.trimhist.Add(trimop);
    }
-   l5+=w5;
-   l3-=trim3;
+   r.trim5+=w5;
+   r.trim3+=trim3;
    if (w3-w5+1<min_read_len) {
      return trim_code; //to be trashed
    }
@@ -1673,14 +1678,14 @@ bool trimmedT=false;
 bool trimmedV=false;
 STrimState ts(wseq,wqv); //work with this structure from now on
 do {
-  int prev_l3=l3;
-  int prev_l5=l5;
+  int prev_t3=r.trim3;
+  int prev_t5=r.trim5;
   trim_code=0;
   if (ts.w3upd) {
     if (trim_poly3(ts.wseq, ts.w5, ts.w3, polyA_seed)) {
       trim_code='A';
       STrimOp trimop(3, trim_code, (ts.w5+(ts.wseq.length()-1-ts.w3)));
-      t_hist.Add(trimop);
+      r.trimhist.Add(trimop);
       b_trimA+=trimop.tlen;
       if (!trimmedA) { num_trimA++; trimmedA=true; }
     }
@@ -1688,13 +1693,13 @@ do {
     if (polyBothEnds && trim_poly3(ts.wseq, ts.w5, ts.w3, polyT_seed)) {
       trim_code='T';
       STrimOp trimop(3, trim_code, (ts.w5+(ts.wseq.length()-1-ts.w3)));
-      t_hist.Add(trimop);
+      r.trimhist.Add(trimop);
       b_trimT+=trimop.tlen;
       if (!trimmedT) { num_trimT++; trimmedT=true; }
     }
     if (trim_code) {
       ts.wupd=true;
-      if (ts.update(trim_code, l5, l3))
+      if (ts.update(trim_code, r.trim5, r.trim3))
          return trim_code;
       trim_code=0;
     }
@@ -1702,12 +1707,12 @@ do {
    if (ts.wupd && trim_adapter3(ts.wseq, ts.w5, ts.w3)) {
        trim_code='V';
        STrimOp trimop(3, trim_code, (ts.w5+(ts.wseq.length()-1-ts.w3)));
-       t_hist.Add(trimop);
+       r.trimhist.Add(trimop);
        b_trimV+=trimop.tlen;
        if (!trimmedV) { num_trimV++; trimmedV=true; }
    }
   if (trim_code) {
-    if (ts.update(trim_code, l5, l3))
+    if (ts.update(trim_code, r.trim5, r.trim3))
         return trim_code;
     //wseq, w5, w3 were updated, let this fall through to next check
     trim_code=0;
@@ -1716,7 +1721,7 @@ do {
     if (trim_poly5(ts.wseq, ts.w5, ts.w3, polyT_seed)) {
         trim_code='T';
         STrimOp trimop(5, trim_code,(ts.w5+(ts.wseq.length()-1-ts.w3)));
-        t_hist.Add(trimop);
+        r.trimhist.Add(trimop);
         b_trimT+=trimop.tlen;
         if (!trimmedT) { num_trimT++; trimmedT=true; }
     }
@@ -1724,13 +1729,13 @@ do {
     if (polyBothEnds && trim_poly5(ts.wseq, ts.w5, ts.w3, polyA_seed)) {
         trim_code='A';
         STrimOp trimop(5, trim_code,(ts.w5+(ts.wseq.length()-1-ts.w3)));
-        t_hist.Add(trimop);
+        r.trimhist.Add(trimop);
         b_trimA+=trimop.tlen;
         if (!trimmedA) { num_trimA++; trimmedA=true; }
     }
     if (trim_code) {
       ts.wupd=true;
-      if (ts.update(trim_code, l5, l3))
+      if (ts.update(trim_code, r.trim3, r.trim3))
          return trim_code;
       trim_code=0;
     }
@@ -1738,19 +1743,19 @@ do {
   if (ts.wupd && trim_adapter5(ts.wseq, ts.w5, ts.w3)) {
       trim_code='V';
       STrimOp trimop(5, trim_code,(ts.w5+(ts.wseq.length()-1-ts.w3)));
-      t_hist.Add(trimop);
+      r.trimhist.Add(trimop);
       b_trimV+=trimop.tlen;
       if (!trimmedV) { num_trimV++; trimmedV=true; }
       }
   //checked the 3' end
   if (trim_code) {
-    if (ts.update(trim_code, l5, l3))
+    if (ts.update(trim_code, r.trim5, r.trim3))
         return trim_code;
     //wseq, w5, w3 were updated, let this fall through to next check
     trim_code=0;
   }
-  ts.w3upd=(l3!=prev_l3);
-  ts.w5upd=(l5!=prev_l5);
+  ts.w3upd=(r.trim3!=prev_t3);
+  ts.w5upd=(r.trim5!=prev_t5);
   ts.wupd=(ts.w3upd || ts.w5upd);
 } while (ts.wupd);
 if (doCollapse) {
@@ -1759,7 +1764,7 @@ if (doCollapse) {
    if (dr==NULL) { //new entry
           //if (prefix.is_empty())
              dhash.Add(ts.wseq.chars(),
-                  new FqDupRec(&ts.wqv, rname.chars()));
+                  new FqDupRec(&ts.wqv, r.rid.chars()));
           //else dhash.Add(wseq.chars(), new FqDupRec(wqv.chars(),wqv.length()));
          }
       else
@@ -1774,7 +1779,7 @@ if (doCollapse) {
         }
      }
    } //not collapsing duplicates
-return (l5>0 || l3<rseq.length()-1) ? 1 : 0;
+return (r.trim5>0 || r.trim3>0) ? 1 : 0;
 }
 
 void printHeader(FILE* f_out, char recmarker, RData& rd) { //GStr& rname, GStr& rinfo) {
@@ -2113,36 +2118,34 @@ bool CTrimHandler::processRead() {
 	RData rd;
 	RData rd2;
 	if (getRead(rd, rd2)) {
-		int a5=0, a3=0, b5=0, b3=0;
+		/* int a5=0, a3=0, b5=0, b3=0;
 		char tcode=0, tcode2=0;
 		GVec<STrimOp> trimhist;
-		GVec<STrimOp> trimhist2;
-		tcode=process_read(rd.rid, rd.seq, rd.qv, a5, a3, trimhist);
-		//tcode: 0 if the read was not trimmed at all and it's long enough
+		GVec<STrimOp> trimhist2; */
+		rd.trashcode=process_read(rd);
+		//trashcode: 0 if the read was not trimmed at all and it's long enough
 		//       1 if it was just trimmed but survived,
 		//       >1 (=trash code character ) if it was trashed for any reason
 #ifdef TRIMDEBUG
-		if (a5>0 || a3<rd.seq.length()-1) {
-			char tc=(tcode>32)? tcode : ('0'+tcode);
-			GMessage("####> Trim code [%c] ( a5 : a3 = %d : %d ): \n",tc, a5,a3);
-			showTrim(rd.seq, a5, a3);
+		if (rd.trim5>0 || rd.trim3<rd.seq.length()-1) {
+			char tc=(rd.trashcode>32)? rd.trashcode : ('0'+rd.trashcode);
+			GMessage("####> Trim code [%c] ( a5 : a3 = %d : %d ): \n",tc, rd.trim5,rd.trim3);
+			showTrim(rd);
 		}
 		else {
 			GMessage("####> No trimming for this read.\n");
 		}
 #endif
 		if (show_Trim) {
-			showTrim(rd.rid, rd.seq, a5, a3, trimhist);
+			showTrim(rd);
 		}
-		if (tcode>0 && trimReport)
-			trim_report(tcode, rd.rid, trimhist, freport);
-		if (a5>0) {
-			b_trim5+=a5;
-			rd.trim5=a5;
+		if (rd.trashcode>0 && trimReport)
+			trim_report(rd.trashcode, rd.rid, rd.trimhist, freport);
+		if (rd.trim5>0) {
+			b_trim5+=rd.trim5;
 			num_trim5++;
 		}
-		if (a3<rd.seq.length()-1) {
-			rd.trim3=rd.seq.length()-a3-1;
+		if (rd.trim3>0) {
 			b_trim3+=rd.trim3;
 			num_trim3++;
 		}
