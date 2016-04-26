@@ -2131,7 +2131,7 @@ void workerThread(GThreadData& td) {
 
 	//decide what to do with this pair and print rd2.seq if any read in the pair makes it
 	if (pairedOutput) {
-		if (rd.trashcode>1 && rd2.trashcode<=1) {
+		if (rd.trashcode>1 && rd2p->trashcode<=1) {
 			rd.trashcode=1; //rescue read
 		}
 		else if (rd.trashcode<=1 && rd2p->trashcode>1) {
@@ -2141,7 +2141,7 @@ void workerThread(GThreadData& td) {
 
 	if (!doCollapse) {
 	  if ((onlyTrimmed && rd.trashcode==1) || !onlyTrimmed )
-	      trimmer.writeRead(rd, rd2);
+	      trimmer.writeRead(rd, *rd2p);
 	}
  }
 
