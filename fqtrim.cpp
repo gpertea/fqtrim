@@ -370,7 +370,6 @@ struct CTrimHandler {
     	  rbuf2.setCapacity(readBufSize);
       }
 	}
-
 	void updateCounts() {
 			//must be guarded by a mutex
 	  inCounter+=incounter;
@@ -405,9 +404,11 @@ struct CTrimHandler {
 		delete gxmem_r;
 	}
 
+	void writeReads();
+
     void writeRead(RData& rd, RData& rd2);
 
-	bool getRead(RData& rdata, RData& rdata2);
+	bool getRead(RData* rdata, RData* rdata2);
 
 	bool processRead();
 
@@ -422,7 +423,7 @@ struct CTrimHandler {
 	bool trim_adapter3(GStr& seq, int &l5, int &l3);
 };
 
-bool getBufRead(GVec<RData>& rbuf, int& rbuf_p, GLineReader* fq, GStr& infname, RData& rdata);
+//bool getBufRead(GVec<RData>& rbuf, int& rbuf_p, GLineReader* fq, GStr& infname, RData& rdata);
 
 void trim_report(char trashcode, GStr& rname, GVec<STrimOp>& t_hist, FILE* freport);
 
@@ -466,7 +467,7 @@ void workerThread(GThreadData& td); // Thread function
 
 
 int main(int argc, char * const argv[]) {
-  GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=dmask:showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:P:q:f:w:t:o:z:a:y:");
+  GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=dmask;showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:P:q:f:w:t:o:z:a:y:");
   int e;
   if ((e=args.isError())>0) {
       GMessage("%s\nInvalid argument: %s\n", USAGE, argv[e]);
@@ -1146,7 +1147,7 @@ int dust(GStr& rseq) {
  for (int i=0;i<rseq.length();i++) {
    if (seq[i]=='N') ncount++;
    }
- if (dustMask) rseq=seq;
+ if (dustMask) rseq=seq; //hard masking requested
  GFREE(seq);
  return ncount;
  }
@@ -1517,14 +1518,92 @@ bool getBufRead(GVec<RData>& rbuf, int& rbuf_p, GLineReader* fq, GStr& infname, 
 	return true;
 }
 
-bool CTrimHandler::getRead(RData& rdata, RData& rdata2) {
-		//GLineReader& fq, GStr& rseq, GStr& rqv,
-    //      GStr& rname, GStr& rinfo, GStr& infname) {
+bool CTrimHandler::getRead(RData* rdata, RData* rdata2) {
+  /*
   if (!getBufRead(rbuf, rbuf_p, rinfo->fq, rinfo->infname, rdata)) return false;
   incounter++;
   if (rinfo->fq2==NULL) return true;
   getBufRead(rbuf2, rbuf2_p, rinfo->fq2, rinfo->infname2, rdata2);
+  */
+ //TODO: fill the read buffer as needed, after flush it to disk (writeRead)
+  rdata=NULL;
+  rdata2=NULL;
+  if (rbuf_p<=0) { //all reads in this buffer were processed
+	  rbuf_p=0;
+	  rbuf2_p=0;
+	  writeReads(); //flush the read buffers
+	  if (rinfo->fq->isEof()) return false;
+	  { //file reading block
+#ifndef NOTHREADS
+			GLockGuard<GFastMutex> guard(readMutex);
+#endif
+			while(!rinfo->fq->isEof() && rbuf_p<readBufSize) {
+				RData rd;
+				if (!getFastxRead(*(rinfo->fq), rd, rinfo->infname)) break;
+				rbuf.Add(rd);
+				//rbuf[rbuf_p]=rd;
+				++rbuf_p;
+			}
+			if (rbuf_p==0) return false;
+			incounter++;
+			GASSERT( rbuf_p==rbuf.Count() );
+			//also load from the mates file, if given
+			rdata=&(rbuf[rbuf.Count()-rbuf_p]);
+			rbuf_p--;
+			if (rinfo->fq2) {
+				while(!rinfo->fq2->isEof() && rbuf2_p<readBufSize) {
+					RData rd;
+					if (!getFastxRead(*(rinfo->fq2), rd, rinfo->infname2)) break;
+					rbuf2.Add(rd);
+					//rbuf[rbuf_p]=rd;
+					++rbuf2_p;
+				}
+				rdata2=&(rbuf2[rbuf2.Count()-rbuf2_p]);
+				rbuf2_p--;
+				if (rbuf_p!=rbuf2_p) {
+					GError("Error: mismatch in the count of reads vs mates!\n");
+				}
+				GASSERT( rbuf2_p==rbuf2.Count() );
+			} //loaded mates
+	  } //file reading block
+  } //read buffer was flushed and refilled with new reads
   return true;
+}
+
+void CTrimHandler::writeReads() {
+	 statsMutex.lock();
+	 //write reads and update counts
+	 for (int i=0;i<rbuf.Count();++i) {
+		RData& rd=rbuf[i];
+		if (rd.trashcode>0 && trimReport)
+			trim_report(rd.trashcode, rd.rid, rd.trimhist, freport);
+		RData rd2;
+		RData *rd2p=&rd2;
+		if (rinfo->fq2 && rbuf2.Count()>i) {
+			rd2p = & (rbuf2[i]);
+		}
+		if (!rd2p->seq.is_empty() && rd2p->trashcode>0 && trimReport)
+			trim_report(rd2p->trashcode, rd2p->rid, rd2p->trimhist, freport);
+
+		//decide what to do with this pair and print rd2.seq if any read in the pair makes it
+		if (pairedOutput) {
+			if (rd.trashcode>1 && rd2p->trashcode<=1) {
+				rd.trashcode=1; //rescue read
+			}
+			else if (rd.trashcode<=1 && rd2p->trashcode>1) {
+				rd2p->trashcode=1; //rescue mate
+			}
+		}
+
+		if (!doCollapse) {
+		  if ((onlyTrimmed && rd.trashcode==1) || !onlyTrimmed )
+		      writeRead(rd, *rd2p);
+		}
+	 }
+	 updateCounts();
+	 rbuf.Clear();
+	 rbuf2.Clear();
+	 statsMutex.unlock();
 }
 
 void showTrim(RData& r) {
@@ -2115,97 +2194,65 @@ void workerThread(GThreadData& td) {
  //CTrimHandler* trimmer=new CTrimHandler(rinfo);
  CTrimHandler trimmer((RInfo*)td.udata);
  while (trimmer.processRead());
- statsMutex.lock();
- //write reads and update counts
- for (int i=0;i<trimmer.rbuf.Count();++i) {
-	RData& rd=trimmer.rbuf[i];
-	if (rd.trashcode>0 && trimReport)
-		trim_report(rd.trashcode, rd.rid, rd.trimhist, freport);
-	RData rd2;
-	RData *rd2p=&rd2;
-	if (trimmer.rinfo->fq2 && trimmer.rbuf2.Count()>i) {
-		rd2p = & (trimmer.rbuf2[i]);
-	}
-	if (!rd2p->seq.is_empty() && rd2p->trashcode>0 && trimReport)
-		trim_report(rd2p->trashcode, rd2p->rid, rd2p->trimhist, freport);
-
-	//decide what to do with this pair and print rd2.seq if any read in the pair makes it
-	if (pairedOutput) {
-		if (rd.trashcode>1 && rd2p->trashcode<=1) {
-			rd.trashcode=1; //rescue read
-		}
-		else if (rd.trashcode<=1 && rd2p->trashcode>1) {
-			rd2p->trashcode=1; //rescue mate
-		}
-	}
-
-	if (!doCollapse) {
-	  if ((onlyTrimmed && rd.trashcode==1) || !onlyTrimmed )
-	      trimmer.writeRead(rd, *rd2p);
-	}
- }
-
- trimmer.updateCounts();
- statsMutex.unlock();
 }
 #endif
 
 bool CTrimHandler::processRead() {
 	//GStr rseq, rqv, seqid, seqinfo;
 	//GStr rseq2, rqv2, seqid2, seqinfo2;
-	RData rd;
-	RData rd2;
+	RData* rd;
+	RData* rd2;
 	if (getRead(rd, rd2)) {
-		rd.trashcode=process_read(rd);
+		rd->trashcode=process_read(*rd);
 		//trashcode: 0 if the read was not trimmed at all and it's long enough
 		//       1 if it was just trimmed but survived,
 		//       >1 (=trash code character ) if it was trashed for any reason
 #ifdef TRIMDEBUG
-		if (rd.trim5>0 || rd.trim3<rd.seq.length()-1) {
-			char tc=(rd.trashcode>32)? rd.trashcode : ('0'+rd.trashcode);
-			GMessage("####> Trim code [%c] ( a5 : a3 = %d : %d ): \n",tc, rd.trim5,rd.trim3);
-			showTrim(rd);
+		if (rd->trim5>0 || rd->trim3<rd->seq.length()-1) {
+			char tc=(rd->trashcode>32)? rd->trashcode : ('0'+rd->trashcode);
+			GMessage("####> Trim code [%c] ( a5 : a3 = %d : %d ): \n",tc, rd->trim5,rd->trim3);
+			showTrim(*rd);
 		}
 		else {
 			GMessage("####> No trimming for this read.\n");
 		}
 #endif
 		if (show_Trim) {
-			showTrim(rd);
+			showTrim(*rd);
 		}
-		if (rd.trim5>0) {
-			b_trim5+=rd.trim5;
+		if (rd->trim5>0) {
+			b_trim5+=rd->trim5;
 			num_trim5++;
 		}
-		if (rd.trim3>0) {
-			b_trim3+=rd.trim3;
+		if (rd->trim3>0) {
+			b_trim3+=rd->trim3;
 			num_trim3++;
 		}
-		if (rinfo->fq2!=NULL && !rd2.seq.is_empty()) { //paired
-			if (!disableMateNameCheck && rd.rid.length()>4 && rd2.rid.length()>=rd.rid.length()) {
-				if (rd.rid.substr(0,rd.rid.length()-3)!=rd2.rid.substr(0,rd.rid.length()-3)) {
+		if (rinfo->fq2!=NULL && rd2!=NULL) { //paired
+			if (!disableMateNameCheck && rd->rid.length()>4 && rd2->rid.length()>=rd->rid.length()) {
+				if (rd->rid.substr(0,rd->rid.length()-3)!=rd2->rid.substr(0,rd->rid.length()-3)) {
 					GError("Error: no paired match for read %s vs %s (%s,%s)\n",
-							rd.rid.chars(), rd2.rid.chars(), rinfo->infname.chars(), rinfo->infname2.chars());
+							rd->rid.chars(), rd2->rid.chars(), rinfo->infname.chars(), rinfo->infname2.chars());
 				}
 			}
-			rd2.trashcode=process_read(rd2);
-			if (rd2.trim5>0) {
-				b_trim5+=rd2.trim5;
+			rd2->trashcode=process_read(*rd2);
+			if (rd2->trim5>0) {
+				b_trim5+=rd2->trim5;
 				num_trim5++;
 			}
-			if (rd2.trim3>0) {
-				b_trim3+=rd2.trim3;
+			if (rd2->trim3>0) {
+				b_trim3+=rd2->trim3;
 				num_trim3++;
 			}
 		} //paired
-		if (rd.trashcode>1) { //read/pair trashed
+		if (rd->trashcode>1) { //read/pair trashed
 			//must use rinfo mutex here
-			if (rd.trashcode=='s') trash_s++;
-			else if (rd.trashcode=='A' || rd.trashcode=='T') trash_poly++;
-			else if (rd.trashcode=='Q') trash_Q++;
-			else if (rd.trashcode=='N') trash_N++;
-			else if (rd.trashcode=='D') trash_D++;
-			else if (rd.trashcode=='V') trash_V++;
+			if (rd->trashcode=='s') trash_s++;
+			else if (rd->trashcode=='A' || rd->trashcode=='T') trash_poly++;
+			else if (rd->trashcode=='Q') trash_Q++;
+			else if (rd->trashcode=='N') trash_N++;
+			else if (rd->trashcode=='D') trash_D++;
+			else if (rd->trashcode=='V') trash_V++;
 			//else if (tcode=='5') trash_A5++;
 		}
 		/*
