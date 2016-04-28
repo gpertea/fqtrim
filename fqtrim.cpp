@@ -200,6 +200,19 @@ int poly_minScore=12; //i.e. an exact match of 6 bases at the proper ends WILL b
 const char *polyA_seed="AAAA";
 const char *polyT_seed="TTTT";
 
+
+#ifndef NOTHREADS
+
+GFastMutex readMutex; //reading input
+GFastMutex writeMutex; //writing the output reads
+GFastMutex reportMutex; //trim report writing
+GFastMutex statsMutex; //for updating global stats
+void workerThread(GThreadData& td); // Thread function
+
+#endif
+
+
+
 struct STrimOp {
 	byte tend; //5 or 3
 	char tcode; //'N','A','T','V'
@@ -370,8 +383,12 @@ struct CTrimHandler {
     	  rbuf2.setCapacity(readBufSize);
       }
 	}
+
 	void updateCounts() {
-			//must be guarded by a mutex
+#ifndef NOTHREADS
+ GLockGuard<GFastMutex> guard(statsMutex);
+#endif
+
 	  inCounter+=incounter;
 	  outCounter+=outcounter;
 	  gtrash_s+=trash_s;
@@ -403,17 +420,18 @@ struct CTrimHandler {
 		delete gxmem_l;
 		delete gxmem_r;
 	}
-
-	void writeReads();
+	void processAll();
+    bool fetchReads();
+	void flushReads();
 
     void writeRead(RData& rd, RData& rd2);
-
-	bool getRead(RData* rdata, RData* rdata2);
-
+	bool nextRead(RData* & rdata, RData* & rdata2);
 	bool processRead();
 
 	char process_read(RData& r);
 	//returns 0 if the read was untouched, 1 if it was trimmed and a trash code if it was trashed
+	//void trim_report(char trashcode, GStr& rname, GVec<STrimOp>& t_hist, FILE* freport);
+	void trim_report(RData& rd, int mate=0);
 
 	bool ntrim(GStr& rseq, int &l5, int &l3, double& pN); //returns true if any trimming occured
 	bool qtrim(GStr& qvs, int &l5, int &l3); //return true if any trimming occured
@@ -425,7 +443,6 @@ struct CTrimHandler {
 
 //bool getBufRead(GVec<RData>& rbuf, int& rbuf_p, GLineReader* fq, GStr& infname, RData& rdata);
 
-void trim_report(char trashcode, GStr& rname, GVec<STrimOp>& t_hist, FILE* freport);
 
 int dust(GStr& seq);
 
@@ -454,17 +471,6 @@ void setupFiles(FILE*& f_in, FILE*& f_in2, FILE*& f_out, FILE*& f_out2,
 
 void convertPhred(char* q, int len);
 void convertPhred(GStr& q);
-
-#ifndef NOTHREADS
-
-GFastMutex readMutex; //reading input
-GFastMutex writeMutex; //writing the output
-GFastMutex reportMutex; //trim report writing
-GFastMutex statsMutex; //for updating global stats
-void workerThread(GThreadData& td); // Thread function
-
-#endif
-
 
 int main(int argc, char * const argv[]) {
   GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=dmask;showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:P:q:f:w:t:o:z:a:y:");
@@ -678,9 +684,9 @@ int main(int argc, char * const argv[]) {
     	threads[t].kickStart(workerThread, &rinfo);
     }
 #else
+
     CTrimHandler* trimmer=new CTrimHandler(&rinfo);
-    while (trimmer->processRead());
-    trimmer->updateCounts();
+    trimmer->processAll();
     delete trimmer;
 #endif
 
@@ -1442,7 +1448,7 @@ bool getFastxRead(GLineReader& fq, RData& rd, GStr& infname) {
 	 while (l!=NULL && (l[0]==0 || isspace(l[0]))) l=fq.getLine(); //ignore empty lines
 	 if (l==NULL) return false;
 	 /* if (rawFormat) {
-	      //TODO: implement raw qseq parsing here
+	      //TODO: implement raw qseq parsing here?
 	      //if (raw type=N) then continue; //skip invalid/bad records
 	      } //raw qseq format
 	 else { // FASTQ or FASTA */
@@ -1518,73 +1524,84 @@ bool getBufRead(GVec<RData>& rbuf, int& rbuf_p, GLineReader* fq, GStr& infname, 
 	return true;
 }
 
-bool CTrimHandler::getRead(RData* rdata, RData* rdata2) {
+bool CTrimHandler::fetchReads() {
+	// do NOT call this unless rbuf_p<=0, it'll clobber the buffer!
+	GASSERT(rbuf_p<=0);
+	//refill read buffer
+	rbuf_p=0;
+	rbuf2_p=0;
+	if (rinfo->fq->isEof()) return false;
+	{ //file reading block
+#ifndef NOTHREADS
+		GLockGuard<GFastMutex> guard(readMutex);
+#endif
+		while(!rinfo->fq->isEof() && rbuf_p<readBufSize) {
+			RData rd;
+			if (!getFastxRead(*(rinfo->fq), rd, rinfo->infname)) break;
+			rbuf.Add(rd);
+			//rbuf[rbuf_p]=rd;
+			++rbuf_p;
+		}
+		if (rbuf_p==0) return false;
+		GASSERT( rbuf_p==rbuf.Count() );
+		//also load from the mates file, if given
+		if (rinfo->fq2) {
+			while(!rinfo->fq2->isEof() && rbuf2_p<readBufSize) {
+				RData rd;
+				if (!getFastxRead(*(rinfo->fq2), rd, rinfo->infname2)) break;
+				rbuf2.Add(rd);
+				//rbuf[rbuf_p]=rd;
+				++rbuf2_p;
+			}
+			if (rbuf_p!=rbuf2_p) {
+				GError("Error: mismatch in the count of reads vs mates!\n");
+			}
+			GASSERT( rbuf2_p==rbuf2.Count() );
+		} //loaded the mates too
+	} //file reading block
+	return true;
+}
+
+bool CTrimHandler::nextRead(RData* & rdata, RData* & rdata2) {
   /*
   if (!getBufRead(rbuf, rbuf_p, rinfo->fq, rinfo->infname, rdata)) return false;
   incounter++;
   if (rinfo->fq2==NULL) return true;
   getBufRead(rbuf2, rbuf2_p, rinfo->fq2, rinfo->infname2, rdata2);
   */
- //TODO: fill the read buffer as needed, after flush it to disk (writeRead)
-  rdata=NULL;
-  rdata2=NULL;
-  if (rbuf_p<=0) { //all reads in this buffer were processed
-	  rbuf_p=0;
-	  rbuf2_p=0;
-	  writeReads(); //flush the read buffers
-	  if (rinfo->fq->isEof()) return false;
-	  { //file reading block
-#ifndef NOTHREADS
-			GLockGuard<GFastMutex> guard(readMutex);
-#endif
-			while(!rinfo->fq->isEof() && rbuf_p<readBufSize) {
-				RData rd;
-				if (!getFastxRead(*(rinfo->fq), rd, rinfo->infname)) break;
-				rbuf.Add(rd);
-				//rbuf[rbuf_p]=rd;
-				++rbuf_p;
-			}
-			if (rbuf_p==0) return false;
-			incounter++;
-			GASSERT( rbuf_p==rbuf.Count() );
-			//also load from the mates file, if given
-			rdata=&(rbuf[rbuf.Count()-rbuf_p]);
-			rbuf_p--;
-			if (rinfo->fq2) {
-				while(!rinfo->fq2->isEof() && rbuf2_p<readBufSize) {
-					RData rd;
-					if (!getFastxRead(*(rinfo->fq2), rd, rinfo->infname2)) break;
-					rbuf2.Add(rd);
-					//rbuf[rbuf_p]=rd;
-					++rbuf2_p;
-				}
-				rdata2=&(rbuf2[rbuf2.Count()-rbuf2_p]);
-				rbuf2_p--;
-				if (rbuf_p!=rbuf2_p) {
-					GError("Error: mismatch in the count of reads vs mates!\n");
-				}
-				GASSERT( rbuf2_p==rbuf2.Count() );
-			} //loaded mates
-	  } //file reading block
-  } //read buffer was flushed and refilled with new reads
+  //rdata=NULL;
+  //rdata2=NULL;
+  GASSERT(rbuf_p>0); //read buffer should be prepared for use!
+  GASSERT(rbuf.Count()>0);
+  //if (rbuf_p<=0) {
+  //  if (!fetchReads()) return false;
+  //}
+  if (rbuf.Count()==0 || rbuf_p<=0) return false;
+  ++incounter;
+  rdata=&(rbuf[rbuf.Count()-rbuf_p]);
+  --rbuf_p;
+  if (rinfo->fq2 && rbuf2.Count()>0) {
+	rdata2=&(rbuf2[rbuf2.Count()-rbuf2_p]);
+	--rbuf2_p;
+  }
   return true;
 }
 
-void CTrimHandler::writeReads() {
-	 statsMutex.lock();
+void CTrimHandler::flushReads() {
 	 //write reads and update counts
 	 for (int i=0;i<rbuf.Count();++i) {
 		RData& rd=rbuf[i];
 		if (rd.trashcode>0 && trimReport)
-			trim_report(rd.trashcode, rd.rid, rd.trimhist, freport);
+			//trim_report(rd.trashcode, rd.rid, rd.trimhist, freport);
+			trim_report(rd);
 		RData rd2;
 		RData *rd2p=&rd2;
 		if (rinfo->fq2 && rbuf2.Count()>i) {
 			rd2p = & (rbuf2[i]);
 		}
 		if (!rd2p->seq.is_empty() && rd2p->trashcode>0 && trimReport)
-			trim_report(rd2p->trashcode, rd2p->rid, rd2p->trimhist, freport);
-
+			//trim_report(rd2p->trashcode, rd2p->rid, rd2p->trimhist, freport);
+			trim_report(*rd2p, 1);
 		//decide what to do with this pair and print rd2.seq if any read in the pair makes it
 		if (pairedOutput) {
 			if (rd.trashcode>1 && rd2p->trashcode<=1) {
@@ -1601,9 +1618,10 @@ void CTrimHandler::writeReads() {
 		}
 	 }
 	 updateCounts();
+	 rbuf_p=0;
+	 rbuf2_p=0;
 	 rbuf.Clear();
 	 rbuf2.Clear();
-	 statsMutex.unlock();
 }
 
 void showTrim(RData& r) {
@@ -1936,26 +1954,34 @@ void CTrimHandler::writeRead(RData& rd, RData& rd2) {
 		write1Read(rinfo->f_out2, rd2, outcounter);
 	}
 }
-
-void trim_report(char trimcode, GStr& rname, GVec<STrimOp>& t_hist, FILE* frep) {
- if (frep==NULL || trimcode==0) return;
- {
+//trim_report(char trimcode, GStr& rname, GVec<STrimOp>& t_hist, FILE* frep)
+void CTrimHandler::trim_report(RData& r, int mate) {
+	if (freport && r.trashcode) {
 #ifndef NOTHREADS
- GLockGuard<GFastMutex> guard(reportMutex);
+		GLockGuard<GFastMutex> guard(reportMutex);
 #endif
- if (t_hist.Count()==0) {
-   if (trimcode<=' ') trimcode='?';
-   fprintf(frep, "%s\t%c\t%c\n",rname.chars(), trimcode, trimcode);
-   return;
- }
- fprintf(frep, "%s\t", rname.chars());
- for (int i=0;i<t_hist.Count();i++) {
-  fprintf(frep,"%d%c%d",t_hist[i].tend, t_hist[i].tcode, t_hist[i].tlen);
-  if (i<t_hist.Count()-1) fprintf(frep,",");
- }
- if (trimcode>' ') fprintf(frep, "\t%c\n", trimcode);
-              else fprintf(frep, "\t\n");
- }
+		GStr rname(r.rid);
+		if (rinfo && rinfo->fq2) {
+			if (mate) {
+				if (!rname.endsWith("/2")) rname+="/2";
+			}
+			else {
+				if (!rname.endsWith("/1")) rname+="/1";
+			}
+		}
+		if (r.trimhist.Count()==0) {
+			if (r.trashcode<=' ') r.trashcode='?';
+			fprintf(freport, "%s\t%c\t%c\n",rname.chars(), r.trashcode, r.trashcode);
+			return;
+		}
+		fprintf(freport, "%s\t", rname.chars());
+		for (int i=0;i<r.trimhist.Count();i++) {
+			fprintf(freport,"%d%c%d",r.trimhist[i].tend, r.trimhist[i].tcode, r.trimhist[i].tlen);
+			if (i<r.trimhist.Count()-1) fprintf(freport,",");
+		}
+		if (r.trashcode>' ') fprintf(freport, "\t%c\n", r.trashcode);
+		else fprintf(freport, "\t\n");
+	}
 }
 
 GStr getFext(GStr& s, int* xpos=NULL) {
@@ -2190,19 +2216,28 @@ void setupFiles(FILE*& f_in, FILE*& f_in2, FILE*& f_out, FILE*& f_out2,
 
 #ifndef NOTHREADS
 void workerThread(GThreadData& td) {
- //RInfo* rinfo=(RInfo*)td.udata;
- //CTrimHandler* trimmer=new CTrimHandler(rinfo);
- CTrimHandler trimmer((RInfo*)td.udata);
- while (trimmer.processRead());
+	CTrimHandler trimmer((RInfo*)td.udata);
+	trimmer.processAll();
 }
 #endif
+
+void CTrimHandler::processAll() {
+	if (fetchReads()) {
+		while (processRead()) {
+			if (rbuf_p<=0) {
+				flushReads(); //flush the read buffers
+				if (!fetchReads()) break;
+			}
+		}
+	}
+}
 
 bool CTrimHandler::processRead() {
 	//GStr rseq, rqv, seqid, seqinfo;
 	//GStr rseq2, rqv2, seqid2, seqinfo2;
-	RData* rd;
-	RData* rd2;
-	if (getRead(rd, rd2)) {
+	RData* rd=NULL;
+	RData* rd2=NULL;
+	if (nextRead(rd, rd2)) {
 		rd->trashcode=process_read(*rd);
 		//trashcode: 0 if the read was not trimmed at all and it's long enough
 		//       1 if it was just trimmed but survived,
@@ -2255,14 +2290,8 @@ bool CTrimHandler::processRead() {
 			else if (rd->trashcode=='V') trash_V++;
 			//else if (tcode=='5') trash_A5++;
 		}
-		/*
-		else if (!doCollapse) {
-			//write read/pair
-			//if ((onlyTrimmed && rd.trashcode==1) || !onlyTrimmed )
-			//	writeRead(*rinfo, rd, rd2, outcounter);
-		}*/
 		return true;
-	} //reading one read (pair)
+	} //proceed read/pair
 	return false;
 }
 
