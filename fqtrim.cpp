@@ -1,4 +1,4 @@
-#define VERSION "0.9.4"
+#define VERSION "0.9.5"
 #include "GArgs.h"
 #include "GStr.h"
 #include "GHash.hh"
@@ -69,6 +69,9 @@ Options:\n\
     than this, the read will be discarded (trashed)(default: 16)\n\
 -r  write a \"trimming report\" file listing the affected reads with a list\n\
     of trimming operations\n\
+--aidx option can only be given with -r and -f options and it makes all the \n\
+	vector/adapter trimming operations encoded as a,b,c,.. instead of V,\n\
+	corresponding to the order of adapter sequences in the -f file\n\
 -T  write the number of bases trimmed at 5' and 3' ends after the read names\n\
     in the FASTA/FASTQ output file(s)\n\
 -D  pass reads through a low-complexity (dust) filter and discard any read\n\
@@ -117,6 +120,7 @@ bool doDust=false;
 bool doPolyTrim=true;
 bool fastaOutput=false;
 bool trimReport=false; //create a trim/trash report file
+bool showAdapterIdx=false;
 bool trimInfo=false; //trim info added to the output reads
 bool polyBothEnds=false; //attempt poly-A/T trimming at both ends
 bool onlyTrimmed=false; //report only trimmed reads
@@ -125,6 +129,7 @@ bool dustMask=false;
 bool pairedOutput=false;
 bool revCompl=false; //also reverse complement adapter sequences
 bool disableMateNameCheck=false;
+int adapter_idx=0;
 int min_read_len=16;
 int num_cpus=1; // -p option
 int readBufSize=200; //how many reads to fetch at a time (useful for multi-threading)
@@ -152,7 +157,7 @@ int gtrash_Q=0;
 int gtrash_N=0;
 int gtrash_D=0;
 int gtrash_V=0;
-
+int gtrash_X=0;
 uint gnum_trimN=0; //reads trimmed by N%
 uint gnum_trimQ=0; //reads trimmed by qv threshold
 uint gnum_trimV=0; //reads trimmed by adapter match
@@ -215,7 +220,7 @@ void workerThread(GThreadData& td); // Thread function
 
 struct STrimOp {
 	byte tend; //5 or 3
-	char tcode; //'N','A','T','V'
+	char tcode; //'N','A','T','V' or 'a'..'z'
 	short tlen; //trim length
 	STrimOp(byte e=0, char c=0, short l=0) {
 		assign(e,c,l);
@@ -274,11 +279,12 @@ struct CASeqData {
 	GVec<uint16>* pzr[4096]; //0-based coordinates of all possible hexamers for the reverse complement of the adapter sequence
 	GStr seq; //actual adapter sequence data
 	GStr seqr; //reverse complement sequence
+	int fidx; //index of adapter in the file (order they are given)
 	int amlen; //fraction of adapter length matching that's enough to consider the alignment
 	GAlnTrimType trim_type;
 	bool use_reverse;
-	CASeqData(bool rev=false):seq(),seqr(),
-			amlen(0), use_reverse(rev) {
+	CASeqData(bool rev=false, int aidx=0):seq(),seqr(),
+			fidx(aidx), amlen(0), use_reverse(rev) {
 		trim_type=galn_None; //should be updated later!
 		for (int i=0;i<4096;i++) {
 			pz[i]=NULL;
@@ -360,6 +366,7 @@ struct CTrimHandler {
 	int trash_N;
 	int trash_D;
 	int trash_V;
+	int trash_X;
 	uint num_trimN, num_trimQ, num_trimV,
 	  num_trimA, num_trimT, num_trim5, num_trim3;
 
@@ -369,26 +376,41 @@ struct CTrimHandler {
 	CTrimHandler(RInfo* ri=NULL): gxmem_l(NULL), gxmem_r(NULL), rbuf(readBufSize), rbuf_p(-1),
 			rbuf2(0),rbuf2_p(-1), rinfo(ri), incounter(0), outcounter(0),trash_s(0), trash_poly(0),
 			trash_Q(0), trash_N(0), trash_D(0), trash_V(0),
+			trash_X(0),
 			num_trimN(0), num_trimQ(0), num_trimV(0), num_trimA(0), num_trimT(0), num_trim5(0), num_trim3(0),
 			b_totalIn(0), b_totalN(0), b_trimN(0), b_trimQ(0), b_trimV(0),
 			b_trimA(0), b_trimT(0), b_trim5(0), b_trim3(0) {
       if (adapters5.Count()>0)
-        //gxmem_l=new CGreedyAlignData(match_reward, mismatch_penalty, Xdrop-2);
         gxmem_l=new CGreedyAlignData(match_reward, mismatch_penalty, Xdrop);
       if (adapters3.Count()>0)
         gxmem_r=new CGreedyAlignData(match_reward, mismatch_penalty, Xdrop);
-      //rbuf.Resize(readBufSize);
       if (ri && ri->fq2) {
-        //rbuf2.Resize(readBufSize);
     	  rbuf2.setCapacity(readBufSize);
       }
+	}
+	void updateTrashCounts(RData& rd);
+
+	void Clear() {
+		 rbuf_p=0; rbuf2_p=0;
+		 incounter=0; outcounter=0;
+		 rbuf.Clear(); rbuf2.Clear();
+		 trash_s=0; trash_poly=0;
+		 trash_Q=0; trash_N=0;
+		 trash_X=0;
+		 trash_D=0; num_trimV=0;
+		 num_trimN=0;num_trimQ=0;
+		 num_trimA=0;num_trimT=0;
+		 num_trim5=0;num_trim3=0;
+		 b_totalIn=0;b_totalN=0;
+		 b_trimN=0;b_trimQ=0;
+		 b_trimV=0;b_trimA=0;b_trimT=0;
+		 b_trim5=0;b_trim3=0;
 	}
 
 	void updateCounts() {
 #ifndef NOTHREADS
  GLockGuard<GFastMutex> guard(statsMutex);
 #endif
-
 	  inCounter+=incounter;
 	  outCounter+=outcounter;
 	  gtrash_s+=trash_s;
@@ -397,6 +419,7 @@ struct CTrimHandler {
 	  gtrash_N+=trash_N;
 	  gtrash_D+=trash_D;
 	  gtrash_V+=trash_V;
+	  gtrash_X+=trash_X;
 
 	  gnum_trimN+=num_trimN;
 	  gnum_trimQ+=num_trimQ;
@@ -437,8 +460,8 @@ struct CTrimHandler {
 	bool qtrim(GStr& qvs, int &l5, int &l3); //return true if any trimming occured
 	bool trim_poly5(GStr &seq, int &l5, int &l3, const char* poly_seed); //returns true if any trimming occured
 	bool trim_poly3(GStr &seq, int &l5, int &l3, const char* poly_seed);
-	bool trim_adapter5(GStr& seq, int &l5, int &l3); //returns true if any trimming occured
-	bool trim_adapter3(GStr& seq, int &l5, int &l3);
+	bool trim_adapter5(GStr& seq, int &l5, int &l3, int &aidx); //returns true if any trimming occured
+	bool trim_adapter3(GStr& seq, int &l5, int &l3, int &aidx);
 };
 
 //bool getBufRead(GVec<RData>& rbuf, int& rbuf_p, GLineReader* fq, GStr& infname, RData& rdata);
@@ -473,7 +496,7 @@ void convertPhred(char* q, int len);
 void convertPhred(GStr& q);
 
 int main(int argc, char * const argv[]) {
-  GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=dmask;showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:P:q:f:w:t:o:z:a:y:");
+  GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=dmask;aidx;showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:P:q:f:w:t:o:z:a:y:");
   int e;
   if ((e=args.isError())>0) {
       GMessage("%s\nInvalid argument: %s\n", USAGE, argv[e]);
@@ -617,6 +640,12 @@ int main(int argc, char * const argv[]) {
                          else outsuffix="-";
   trimReport =  (args.getOpt('r')!=NULL);
   trimInfo = (args.getOpt('T')!=NULL);
+  if (args.getOpt("aidx")!=NULL) {
+	  if (!trimReport || !fileAdapters)
+		  GError("Error: option --aidx requires -f and -r options.\n");
+	  showAdapterIdx=true;
+  }
+
   int fcount=args.startNonOpt();
   if (fcount==0) {
     GMessage(USAGE);
@@ -625,8 +654,7 @@ int main(int argc, char * const argv[]) {
    if (fcount>1 && doCollapse) {
     GError("%s Sorry, the -C option only works with a single input file.\n", USAGE);
     }
-  //openfw(f_out, args, 'o');
-  //if (f_out==NULL) f_out=stdout;
+  if (verbose) args.printCmdLine(stderr);
   if (trimReport)
     openfw(freport, args, 'r');
   char* infile=NULL;
@@ -641,6 +669,7 @@ int main(int argc, char * const argv[]) {
     gtrash_D=0;
     gtrash_poly=0;
     gtrash_V=0;
+    gtrash_X=0;
 
     gnum_trimN=0;
     gnum_trimQ=0;
@@ -754,7 +783,10 @@ int main(int argc, char * const argv[]) {
        if (paired_reads) {
            GMessage(">Input files : %s , %s\n", infname.chars(), infname2.chars());
            GMessage("Number of input pairs :%9u\n", inCounter);
-           GMessage("         Output pairs :%9u\t(%u discarded)\n", outCounter, inCounter-outCounter);
+           if (onlyTrimmed)
+               GMessage("         Output pairs :%9u\t(trimmed only)\n", outCounter);
+           else
+        	   GMessage("         Output pairs :%9u\t(%u discarded)\n", outCounter, inCounter-outCounter);
            }
          else {
            GMessage(">Input file : %s\n", infname.chars());
@@ -787,6 +819,8 @@ int main(int argc, char * const argv[]) {
          GMessage("   Trashed by poly-A/T:%9d\n", gtrash_poly);
        if (gtrash_V>0)
          GMessage("    Trashed by adapter:%9d\n", gtrash_V);
+       if (gtrash_X>0)
+         GMessage("    Trashed by X      :%9d\n", gtrash_X);
      GMessage("\n-------------- Base counts: ----------------\n");
        GMessage("      Input bases :%12llu\n", gb_totalIn);
        double percN=100.0* ((double)gb_totalN/(double)gb_totalIn);
@@ -1323,7 +1357,7 @@ if ((maxloc.score==poly_minScore && li==0) ||
 return false;
 }
 
-bool CTrimHandler::trim_adapter3(GStr& seq, int&l5, int &l3) {
+bool CTrimHandler::trim_adapter3(GStr& seq, int&l5, int &l3, int& aidx) {
  if (adapters3.Count()==0) return false;
  //GMessage("Trimming adapter 3!\n");
  int rlen=seq.length();
@@ -1335,6 +1369,7 @@ bool CTrimHandler::trim_adapter3(GStr& seq, int&l5, int &l3) {
  GXSeqData seqdata;
  int numruns=revCompl ? 2 : 1;
  GList<GXAlnInfo> bestalns(true, true, false);
+ aidx=-1;
  for (int ai=0;ai<adapters3.Count();ai++) {
    for (int r=0;r<numruns;r++) {
      if (r) {
@@ -1348,6 +1383,7 @@ bool CTrimHandler::trim_adapter3(GStr& seq, int&l5, int &l3) {
      //GXAlnInfo* aln=match_adapter(seqdata, adapters3[ai]->trim_type, minEndAdapter, gxmem_r, min_pid3);
      GXAlnInfo* aln=match_adapter(seqdata, galn_TrimRight, minEndAdapter, gxmem_r, min_pid3);
 	 if (aln) {
+	   aln->udata=adapters3[ai]->fidx;
 	   if (aln->strong) {
 		   trimmed=true;
 		   bestalns.Add(aln);
@@ -1373,12 +1409,14 @@ bool CTrimHandler::trim_adapter3(GStr& seq, int&l5, int &l3) {
 	   //if (l3-l5+1<min_read_len) return true;
 	   wseq=seq.substr(l5,l3-l5+1);
 	   wlen=wseq.length();
+	   aidx=aln->udata;
 	   return true; //break the loops here to report a good find
      }
+  aidx=-1;
   return false;
  }
 
-bool CTrimHandler::trim_adapter5(GStr& seq, int&l5, int &l3) {
+bool CTrimHandler::trim_adapter5(GStr& seq, int&l5, int &l3, int& aidx) {
  if (adapters5.Count()==0) return false;
  int rlen=seq.length();
  l5=0;
@@ -1389,6 +1427,7 @@ bool CTrimHandler::trim_adapter5(GStr& seq, int&l5, int &l3) {
  GXSeqData seqdata;
  int numruns=revCompl ? 2 : 1;
  GList<GXAlnInfo> bestalns(true, true, false);
+ aidx=-1;
  for (int ai=0;ai<adapters5.Count();ai++) {
    for (int r=0;r<numruns;r++) {
      if (r) {
@@ -1403,6 +1442,7 @@ bool CTrimHandler::trim_adapter5(GStr& seq, int&l5, int &l3) {
      GXAlnInfo* aln=match_adapter(seqdata, galn_TrimLeft,
 		                                       minEndAdapter, gxmem_l, min_pid5);
 	 if (aln) {
+	   aln->udata=adapters5[ai]->fidx;
 	   if (aln->strong) {
 		   trimmed=true;
 		   bestalns.Add(aln);
@@ -1428,8 +1468,10 @@ bool CTrimHandler::trim_adapter5(GStr& seq, int&l5, int &l3) {
 	   //if (l3-l5+1<min_read_len) return true;
 	   wseq=seq.substr(l5,l3-l5+1);
 	   wlen=wseq.length();
+	   aidx=aln->udata;
 	   return true; //break the loops here to report a good find
      }
+  aidx=-1;
   return false;
 }
 
@@ -1591,18 +1633,20 @@ void CTrimHandler::flushReads() {
 	 //write reads and update counts
 	 for (int i=0;i<rbuf.Count();++i) {
 		RData& rd=rbuf[i];
+		bool trimmed=(rd.trashcode>0);
 		if (rd.trashcode>0 && trimReport)
-			//trim_report(rd.trashcode, rd.rid, rd.trimhist, freport);
 			trim_report(rd);
 		RData rd2;
 		RData *rd2p=&rd2;
 		if (rinfo->fq2 && rbuf2.Count()>i) {
 			rd2p = & (rbuf2[i]);
 		}
-		if (!rd2p->seq.is_empty() && rd2p->trashcode>0 && trimReport)
-			//trim_report(rd2p->trashcode, rd2p->rid, rd2p->trimhist, freport);
+		if (!rd2p->seq.is_empty() && rd2p->trashcode>0 && trimReport) {
 			trim_report(*rd2p, 1);
+			trimmed=true;
+		}
 		//decide what to do with this pair and print rd2.seq if any read in the pair makes it
+		/*
 		if (pairedOutput) {
 			if (rd.trashcode>1 && rd2p->trashcode<=1) {
 				rd.trashcode=1; //rescue read
@@ -1611,17 +1655,14 @@ void CTrimHandler::flushReads() {
 				rd2p->trashcode=1; //rescue mate
 			}
 		}
-
+		*/
 		if (!doCollapse) {
-		  if ((onlyTrimmed && rd.trashcode==1) || !onlyTrimmed )
+		  if ((onlyTrimmed && trimmed) || !onlyTrimmed )
 		      writeRead(rd, *rd2p);
 		}
 	 }
 	 updateCounts();
-	 rbuf_p=0;
-	 rbuf2_p=0;
-	 rbuf.Clear();
-	 rbuf2.Clear();
+	 Clear();
 }
 
 void showTrim(RData& r) {
@@ -1812,8 +1853,10 @@ do {
       trim_code=0;
     }
    }
-   if (ts.wupd && trim_adapter3(ts.wseq, ts.w5, ts.w3)) {
-       trim_code='V';
+   int tidx=-1;
+   if (ts.wupd && trim_adapter3(ts.wseq, ts.w5, ts.w3, tidx)) {
+       if (showAdapterIdx && tidx>=0) trim_code=('a'+tidx);
+    	   else trim_code='V';
        STrimOp trimop(3, trim_code, (ts.w5+(ts.wseq.length()-1-ts.w3)));
        r.trimhist.Add(trimop);
        b_trimV+=trimop.tlen;
@@ -1848,8 +1891,10 @@ do {
       trim_code=0;
     }
   }
-  if (ts.wupd && trim_adapter5(ts.wseq, ts.w5, ts.w3)) {
-      trim_code='V';
+  tidx=-1;
+  if (ts.wupd && trim_adapter5(ts.wseq, ts.w5, ts.w3, tidx)) {
+      if (showAdapterIdx && tidx>=0) trim_code=('a'+tidx);
+   	   else trim_code='V';
       STrimOp trimop(5, trim_code,(ts.w5+(ts.wseq.length()-1-ts.w3)));
       r.trimhist.Add(trimop);
       b_trimV+=trimop.tlen;
@@ -2083,9 +2128,9 @@ void guess_unzip(GStr& fname, GStr& picmd) {
 
 void addAdapter(GPVec<CASeqData>& adapters, GStr& seq, GAlnTrimType trim_type) {
   if (seq.is_empty() || seq=="-" ||
-	  seq=="N/A" || seq==".") return;
-
- CASeqData* adata = new CASeqData(revCompl);
+      seq=="N/A" || seq==".") return;
+ ++adapter_idx;
+ CASeqData* adata = new CASeqData(revCompl, adapter_idx);
  int idx=adapters.Add(adata);
  if (idx<0) GError("Error: failed to add adapter!\n");
  adapters[idx]->trim_type=trim_type;
@@ -2232,6 +2277,21 @@ void CTrimHandler::processAll() {
 	}
 }
 
+void CTrimHandler::updateTrashCounts(RData& rd) {
+	if (rd.trashcode>1) { //read/pair trashed
+		if (rd.trashcode=='s') trash_s++;
+		else if (rd.trashcode=='A' || rd.trashcode=='T') trash_poly++;
+		else if (rd.trashcode=='Q') trash_Q++;
+		else if (rd.trashcode=='N') trash_N++;
+		else if (rd.trashcode=='D') trash_D++;
+		else if (rd.trashcode=='V') trash_V++;
+		else {
+			trash_X++;
+		}
+	}
+
+}
+
 bool CTrimHandler::processRead() {
 	//GStr rseq, rqv, seqid, seqinfo;
 	//GStr rseq2, rqv2, seqid2, seqinfo2;
@@ -2279,17 +2339,9 @@ bool CTrimHandler::processRead() {
 				b_trim3+=rd2->trim3;
 				num_trim3++;
 			}
+			updateTrashCounts(*rd2);
 		} //paired
-		if (rd->trashcode>1) { //read/pair trashed
-			//must use rinfo mutex here
-			if (rd->trashcode=='s') trash_s++;
-			else if (rd->trashcode=='A' || rd->trashcode=='T') trash_poly++;
-			else if (rd->trashcode=='Q') trash_Q++;
-			else if (rd->trashcode=='N') trash_N++;
-			else if (rd->trashcode=='D') trash_D++;
-			else if (rd->trashcode=='V') trash_V++;
-			//else if (tcode=='5') trash_A5++;
-		}
+		updateTrashCounts(*rd);
 		return true;
 	} //proceed read/pair
 	return false;
