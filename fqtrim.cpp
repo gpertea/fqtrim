@@ -1984,9 +1984,9 @@ void write1Read(FILE* fout, RData& rd, int counter) {
 }
 
 void CTrimHandler::writeRead(RData& rd, RData& rd2) {
-//#ifndef NOTHREADS
-//	GLockGuard<GFastMutex> guard(writeMutex);
-//#endif
+#ifndef NOTHREADS
+	GLockGuard<GFastMutex> guard(writeMutex);
+#endif
 	outcounter++;
 	if (show_Trim) return;
 	bool writePair=false;
@@ -1999,6 +1999,7 @@ void CTrimHandler::writeRead(RData& rd, RData& rd2) {
 		write1Read(rinfo->f_out2, rd2, outcounter);
 	}
 }
+
 //trim_report(char trimcode, GStr& rname, GVec<STrimOp>& t_hist, FILE* frep)
 void CTrimHandler::trim_report(RData& r, int mate) {
 	if (freport && r.trashcode) {
