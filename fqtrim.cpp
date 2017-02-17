@@ -346,7 +346,7 @@ class FqDupRec {
        GError("Error at FqDupRec::add(): cannot collapse reads with different length!\n");
      count++;
      for (int i=0;i<len;i++)
-       qv[i]=(qv[i]+d[i])/2;
+       qv[i]+=(d[i]-qv[i])/count; //the mean is calculated incrementally
      }
  };
 
