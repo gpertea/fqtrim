@@ -28,11 +28,11 @@
 #define DBGPRINT5(a,b,c,d,e)
 #endif
 
-#define USAGE "fqtrim v"VERSION". Usage:\n\
+#define USAGE "fqtrim v" VERSION ". Usage:\n\
 fqtrim [{-5 <5adapter> -3 <3adapter>|-f <adapters_file>}] [-a <min_match>]\\\n\
    [-R] [-q <minq> [-t <trim_max_len>]] [-p <numcpus>] [-P {64|33}] \\\n\
-   [-m <max_percN>] [--ntrimdist=<max_Ntrim_dist>] \\\n\
-   [-o <outsuffix>] [-l <minlen>] [-C][-D][-Q][-O] [-n <rename_prefix>]\\\n\
+   [-m <max_percN>] [--ntrimdist=<max_Ntrim_dist>] [-l <minlen>] [-C]\\\n\
+   [-o <outsuffix> [--outdir <outdir>]] [-D][-Q][-O] [-n <rename_prefix>]\\\n\
    [-r <trim_report.txt>] [-y <min_poly>] [-A|-B] <input.fq>[,<input_mates.fq>\\\n\
  \n\
  Trim low quality bases at the 3' end and can trim adapter sequence(s), filter\n\
@@ -46,11 +46,12 @@ Options:\n\
     if -C option was also provided, the suffix \"_x<N>\" is appended\n\
     (where <N> is the read duplication count)\n\
 -o  write the trimmed/filtered reads to file(s) named <input>.<outsuffix>\n\
-    which will be created in the current (working) directory; this suffix \n\
-    should include the file extension and if this extension is .gz, .gzip\n\
-    or .bz2 then the output will be compressed accordingly.\n\
+    which will be created in the current (working) directory (unless --outdir\n\
+    is used); this suffix should include the file extension; if this extension\n\
+    is .gz, .gzip or .bz2 then the output will be compressed accordingly.\n\
     NOTE: if the input file is '-' (stdin) then this is the full name of the\n\
     output file, not just the suffix.\n\
+--outdir for -o option, write the output file(s) to <outdir> directory instead\n\
 -f  file with adapter sequences to trim, each line having this format:\n\
     [<5_adapter_sequence>][ <3_adapter_sequence>]\n\
 -5  trim the given adapter or primer sequence at the 5' end of each read\n\
@@ -143,6 +144,7 @@ int dist_lenN=0; // incremental distance from either end (in bp)
 int dust_cutoff=16;
 bool isfasta=false;
 bool convert_phred=false;
+GStr outdir(".");
 GStr outsuffix; // -o
 GStr prefix;
 GStr zcmd;
@@ -496,7 +498,7 @@ void convertPhred(char* q, int len);
 void convertPhred(GStr& q);
 
 int main(int argc, char * const argv[]) {
-  GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=dmask;aidx;showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:P:q:f:w:t:o:z:a:y:");
+  GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=outdir=dmask;aidx;showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:P:q:f:w:t:o:z:a:y:");
   int e;
   if ((e=args.isError())>0) {
       GMessage("%s\nInvalid argument: %s\n", USAGE, argv[e]);
@@ -617,9 +619,9 @@ int main(int argc, char * const argv[]) {
   if (!s.is_empty()) {
     if (fileAdapters)
       GError("Error: options -3 and -f cannot be used together!\n");
-      s.upper();
-      addAdapter(adapters3, s, galn_TrimRight);
-    }
+    s.upper();
+    addAdapter(adapters3, s, galn_TrimRight);
+  }
   s=args.getOpt('y');
   if (!s.is_empty()) {
      int minmatch=s.asInt();
@@ -638,6 +640,12 @@ int main(int argc, char * const argv[]) {
 
   if (args.getOpt('o')!=NULL) outsuffix=args.getOpt('o');
                          else outsuffix="-";
+  if (args.getOpt("outdir")!=NULL) {
+    outdir=args.getOpt("outdir");
+    if (outdir.length()==0) outdir=".";
+    outdir.chomp("/");
+    }
+  
   trimReport =  (args.getOpt('r')!=NULL);
   trimInfo = (args.getOpt('T')!=NULL);
   if (args.getOpt("aidx")!=NULL) {
@@ -2090,21 +2098,24 @@ FILE* prepOutFile(GStr& infname, GStr& pocmd) {
   //eliminate known extensions
   if (outsuffix.is_empty() || outsuffix=="-") { return stdout; }
     else if (pocmd.is_empty()) {
-               GStr oname;
+               GStr oname(outdir);
+               oname.append('/');
                if (fullname) {
-                 oname=outsuffix;
+                 oname.append(outsuffix);
                }
                else {
-                 oname=fname;
+                 oname.append(fname);
                  oname.append('.');
                  oname.append(outsuffix);
                }
                f_out=fopen(oname.chars(),"w");
-               if (f_out==NULL) GError("Error: cannot create '%s'\n",oname.chars());
+               if (f_out==NULL) GError("Error: cannot create file '%s'\n",oname.chars());
                }
             else {
               GStr oname(pocmd);
               oname.append('>');
+              oname.append(outdir);
+              oname.append('/');
               if (!fullname) {
                 oname.append(fname);
                 oname.append('.');
@@ -2149,7 +2160,7 @@ int loadAdapters(const char* fname) {
   GLineReader lr(fname);
   char* l;
   while ((l=lr.nextLine())!=NULL) {
-   if (lr.length()<=3 || l[0]=='#') continue;
+   if (lr.tlength()<=3 || l[0]=='#') continue;
    if ( l[0]==' ' || l[0]=='\t' || l[0]==',' ||
         l[0]==';'|| l[0]==':' ) { //starts with a delimiter
        //so we're reading 3' adapter here
