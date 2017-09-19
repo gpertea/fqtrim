@@ -1995,15 +1995,17 @@ void CTrimHandler::writeRead(RData& rd, RData& rd2) {
 #ifndef NOTHREADS
 	GLockGuard<GFastMutex> guard(writeMutex);
 #endif
-	outcounter++;
-	if (show_Trim) return;
+
+	if (show_Trim) { outcounter++; return; }
 	bool writePair=false;
 	if (pairedOutput && (rd.trashcode<=1 || rd2.trashcode<=1))
-		writePair=true;
+		 writePair=true;
 	if (rinfo->f_out && (writePair || rd.trashcode<=1)) {
+		outcounter++;
 		write1Read(rinfo->f_out, rd, outcounter);
 	}
 	if (rinfo->f_out2 && (writePair || rd2.trashcode<=1))  {
+		if (!pairedOutput) outcounter++;
 		write1Read(rinfo->f_out2, rd2, outcounter);
 	}
 }
