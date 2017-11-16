@@ -1,4 +1,4 @@
-#define VERSION "0.9.5"
+#define VERSION "0.9.6"
 #include "GArgs.h"
 #include "GStr.h"
 #include "GHash.hh"
@@ -12,21 +12,8 @@
 #include "time.h"
 #include "sys/time.h"
 
-//uncomment this to show DBGPRINT messages
-//#define DEBUGPRINT 1
-#ifdef DEBUGPRINT
-#define DBGPRINT(x) GMessage(x)
-#define DBGPRINT2(a,b) GMessage(a,b)
-#define DBGPRINT3(a,b,c) GMessage(a,b,c)
-#define DBGPRINT4(a,b,c,d) GMessage(a,b,c,d)
-#define DBGPRINT5(a,b,c,d,e) GMessage(a,b,c,d,e)
-#else
-#define DBGPRINT(x)
-#define DBGPRINT2(a,b)
-#define DBGPRINT3(a,b,c)
-#define DBGPRINT4(a,b,c,d)
-#define DBGPRINT5(a,b,c,d,e)
-#endif
+//DEBUG only: uncomment this to show trimming progress
+//#define TRIMDEBUG 1
 
 #define USAGE "fqtrim v" VERSION ". Usage:\n\
 fqtrim [{-5 <5adapter> -3 <3adapter>|-f <adapters_file>}] [-a <min_match>]\\\n\
@@ -721,7 +708,6 @@ int main(int argc, char * const argv[]) {
     	threads[t].kickStart(workerThread, &rinfo);
     }
 #else
-
     CTrimHandler* trimmer=new CTrimHandler(&rinfo);
     trimmer->processAll();
     delete trimmer;
@@ -1725,10 +1711,10 @@ struct STrimState {
  char update(char trim_code, int& trim5, int& trim3) {
    trim5+=w5;
    trim3+=(wseq.length()-1-w3);
- #ifdef TRIMDEBUG
-   GMessage("#### TRIM by '%c' code ( w5-w3 = %d-%d ):\n",trim_code, w5,w3);
-   showTrim(wseq, w5, w3);
- #endif
+ //#ifdef TRIMDEBUG
+ //  GMessage("#### TRIM by '%c' code ( w5-w3 = %d-%d ):\n",trim_code, w5,w3);
+ //  showTrim(wseq, wqv, w5, w3);
+ //#endif
    //-- keep only the w5..w3 range
    wseq=wseq.substr(w5, w3-w5+1);
    if (!wqv.is_empty())
@@ -1744,14 +1730,8 @@ struct STrimState {
 };
 
 char CTrimHandler::process_read (RData &r) {
-//(GStr& rname, GStr& rseq, GStr& rqv, int &l5, int &l3,
-//	        GVec<STrimOp>& t_hist) {
  //returns 0 if the read was untouched, 1 if it was just trimmed
  // and a trash code if it was trashed
- #ifdef TRIMDEBUG
-   GMessage(">%s\n", rname.chars());
-   GMessage("%s\n",rseq.chars());
- #endif
  if (r.seq.length()-r.trim5-r.trim3<min_read_len) {
    return 's'; //too short already
    }
@@ -1771,9 +1751,6 @@ int w3=r.seq.length()-r.trim3-1;
 
 //first do the q-based trimming
 if (qvtrim_qmin!=0 && !wqv.is_empty() && qtrim(wqv, w5, w3)) { // qv-threshold trimming
-//   #ifdef TRIMDEBUG
-//   GMessage("\t#### qtrim(): %d-%d : %s\n",w5,w3, wqv.substr(w5, w3-w5+1).chars());
-//   #endif
    trim_code='Q';
    int t5=(w5-r.trim5);
    if (t5>0) {
@@ -1785,6 +1762,9 @@ if (qvtrim_qmin!=0 && !wqv.is_empty() && qtrim(wqv, w5, w3)) { // qv-threshold t
       STrimOp trimop(3,trim_code,t3);
       r.trimhist.Add(trimop);
    }
+   #ifdef TRIMDEBUG
+     GMessage("#DBG# qv trimming: %d from 5'end; %d from 3'end\n",t5,t3);
+   #endif
    b_trimQ+=t5+t3;
    num_trimQ++;
    r.trim5=w5;
@@ -1801,6 +1781,9 @@ if (qvtrim_qmin!=0 && !wqv.is_empty() && qtrim(wqv, w5, w3)) { // qv-threshold t
 if (ntrim(wseq, w5, w3, percN)) {
    //Note: ntrim sets w5 to the number of trimmed bases at read start
    //     and w3 to the new end of read sequence
+#ifdef TRIMDEBUG
+   GMessage("#DBG# N trim: keeping %d-%d range: %s\n",w5+1,w3, wseq.substr(w5, w3-w5+1).chars() );
+#endif
    int trim3=(wseq.length()-1-w3);
    trim_code='N';
    b_trimN+=w5+trim3;
@@ -1842,6 +1825,9 @@ do {
     if (trim_poly3(ts.wseq, ts.w5, ts.w3, polyA_seed)) {
       trim_code='A';
       STrimOp trimop(3, trim_code, (ts.w5+(ts.wseq.length()-1-ts.w3)));
+      #ifdef TRIMDEBUG
+        GMessage("#DBG# 3' polyA trimming %d bases\n",trimop.tlen);
+      #endif
       r.trimhist.Add(trimop);
       b_trimA+=trimop.tlen;
       if (!trimmedA) { num_trimA++; trimmedA=true; }
@@ -1850,6 +1836,9 @@ do {
     if (polyBothEnds && trim_poly3(ts.wseq, ts.w5, ts.w3, polyT_seed)) {
       trim_code='T';
       STrimOp trimop(3, trim_code, (ts.w5+(ts.wseq.length()-1-ts.w3)));
+     #ifdef TRIMDEBUG
+       GMessage("#DBG# 3' polyT trimming %d bases\n",trimop.tlen);
+     #endif
       r.trimhist.Add(trimop);
       b_trimT+=trimop.tlen;
       if (!trimmedT) { num_trimT++; trimmedT=true; }
@@ -1864,22 +1853,29 @@ do {
    int tidx=-1;
    if (ts.wupd && trim_adapter3(ts.wseq, ts.w5, ts.w3, tidx)) {
        if (showAdapterIdx && tidx>=0) trim_code=('a'+tidx);
-    	   else trim_code='V';
+         else trim_code='V';
        STrimOp trimop(3, trim_code, (ts.w5+(ts.wseq.length()-1-ts.w3)));
+       #ifdef TRIMDEBUG
+          GMessage("#DBG# 3' adapter trimming %d bases\n",trimop.tlen);
+       #endif
+
        r.trimhist.Add(trimop);
        b_trimV+=trimop.tlen;
        if (!trimmedV) { num_trimV++; trimmedV=true; }
    }
-  if (trim_code) {
+   if (trim_code) {
     if (ts.update(trim_code, r.trim5, r.trim3))
         return trim_code;
     //wseq, w5, w3 were updated, let this fall through to next check
     trim_code=0;
-  }
-  if (ts.w5upd) {
+   }
+   if (ts.w5upd) {
     if (trim_poly5(ts.wseq, ts.w5, ts.w3, polyT_seed)) {
         trim_code='T';
         STrimOp trimop(5, trim_code,(ts.w5+(ts.wseq.length()-1-ts.w3)));
+        #ifdef TRIMDEBUG
+          GMessage("#DBG# 5' polyT trimming %d bases\n",trimop.tlen);
+        #endif
         r.trimhist.Add(trimop);
         b_trimT+=trimop.tlen;
         if (!trimmedT) { num_trimT++; trimmedT=true; }
@@ -1888,22 +1884,28 @@ do {
     if (polyBothEnds && trim_poly5(ts.wseq, ts.w5, ts.w3, polyA_seed)) {
         trim_code='A';
         STrimOp trimop(5, trim_code,(ts.w5+(ts.wseq.length()-1-ts.w3)));
+		#ifdef TRIMDEBUG
+		  GMessage("#DBG# 5' polyA trimming %d bases\n",trimop.tlen);
+		#endif
         r.trimhist.Add(trimop);
         b_trimA+=trimop.tlen;
         if (!trimmedA) { num_trimA++; trimmedA=true; }
     }
     if (trim_code) {
       ts.wupd=true;
-      if (ts.update(trim_code, r.trim3, r.trim3))
+      if (ts.update(trim_code, r.trim5, r.trim3))
          return trim_code;
       trim_code=0;
     }
-  }
-  tidx=-1;
-  if (ts.wupd && trim_adapter5(ts.wseq, ts.w5, ts.w3, tidx)) {
+   }
+   tidx=-1;
+   if (ts.wupd && trim_adapter5(ts.wseq, ts.w5, ts.w3, tidx)) {
       if (showAdapterIdx && tidx>=0) trim_code=('a'+tidx);
    	   else trim_code='V';
       STrimOp trimop(5, trim_code,(ts.w5+(ts.wseq.length()-1-ts.w3)));
+	  #ifdef TRIMDEBUG
+	    GMessage("#DBG# 5' adapter trimming %d bases\n",trimop.tlen);
+	  #endif
       r.trimhist.Add(trimop);
       b_trimV+=trimop.tlen;
       if (!trimmedV) { num_trimV++; trimmedV=true; }
@@ -2319,7 +2321,7 @@ bool CTrimHandler::processRead() {
 #ifdef TRIMDEBUG
 		if (rd->trim5>0 || rd->trim3<rd->seq.length()-1) {
 			char tc=(rd->trashcode>32)? rd->trashcode : ('0'+rd->trashcode);
-			GMessage("####> Trim code [%c] ( a5 : a3 = %d : %d ): \n",tc, rd->trim5,rd->trim3);
+			GMessage("####> Trim code [%c] ( trim5=%d, trim3=%d): \n",tc, rd->trim5,rd->trim3);
 			showTrim(*rd);
 		}
 		else {
