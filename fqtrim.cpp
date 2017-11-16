@@ -12,7 +12,7 @@
 #include "time.h"
 #include "sys/time.h"
 
-//DEBUG only: uncomment this to show trimming progress
+//DEBUG ONLY: uncomment this to show trimming progress
 //#define TRIMDEBUG 1
 
 #define USAGE "fqtrim v" VERSION ". Usage:\n\
@@ -49,9 +49,9 @@ Options:\n\
 -B  trim polyA/T at both ends (default: only poly-A at 3' end, poly-T at 5')\n\
 -O  only reads affected by trimming will be printed\n\
 -y  minimum length of poly-A/T run to remove (6)\n\
--q  trim 3' end of reads when the quality value drops below <minq>\n\
+-q  trim read ends where the quality value drops below <minq>\n\
 -w  for -q, sliding window size for calculating avg. quality (default 6)\n\
--t  for -q, maximum trimming at the 3' end is limited to <trim_max_len>\n\
+-t  for -q, limit maximum trimming at either end to <trim_max_len>\n\
 -m  maximum percentage of Ns allowed in a read after trimming (default 5)\n\
 -l  minimum read length after trimming (if the remaining sequence is shorter\n\
     than this, the read will be discarded (trashed)(default: 16)\n\
@@ -964,25 +964,26 @@ if (qv_phredtype==0) {
   if (verbose)
     GMessage("Input reads have Phred-%d quality values.\n", (qv_phredtype==33 ? 33 : 64));
 } //guessing Phred type
-  
-if (qvtrim_win<3) { //no sliding window
- //old code: scan from the end and look for two consecutive bases above the threshold
-  for (;l3>2;l3--) {
+int winlen=GMIN(qvtrim_win, qvs.length()/4);
+if (winlen<3) {
+ //no sliding window
+ //scan from the ends and look for two consecutive bases above the threshold
+ for (;l3>2;l3--) {
     if (qvs[l3]-qv_phredtype>=qvtrim_qmin && qvs[l3-1]-qv_phredtype>=qvtrim_qmin) break;
-  }
-//just in case, check also the 5' the end (?)
-/*
-  for (l5=0;l5<qvs.length()-3;l5++) {
-    if (qvs[l5]-qv_phredtype>=qvtrim_qmin && qvs[l5+1]-qv_phredtype>=qvtrim_qmin) break;
-  }
-  */
  }
+// qtrim 5' end
+ for (l5=0;l5<qvs.length()-3;l5++) {
+    if (qvs[l5]-qv_phredtype>=qvtrim_qmin && qvs[l5+1]-qv_phredtype>=qvtrim_qmin) break;
+ }
+}
 else {
- //sliding window from the 5' end:
+ // trim 3'
+ //sliding window from the 5' end until avg qual drops below the threshold
  //init sum
- int winlen=GMIN(qvtrim_win, qvs.length());
+
  int qsum=0;
- int qilow=-1;
+ /*
+ int qilow=-1; //first base index where qv drops below qmin
  for (int q=0;q<winlen;q++) {
    int qvq=qvs[q]-qv_phredtype;
    qsum+=qvq;
@@ -1013,11 +1014,67 @@ else {
        }
    } //for each sliding window
  }
+ */
+ int qi5=l5; //suggested qv trim 5' base index
+ int qi3=l3; //suggested qv trim 3' base index
+ double qavg; //avg. qv for the current window
+ int i5bw=-1; //index of first base below threshold in current window
+ int i3bw=-1; //index of last base below threshold in current window
+ bool okfound=false; //found a window above threshold
+ for (int i=0;i<winlen;++i) {
+   int cq=qvs[i]-qv_phredtype;
+   qsum+=cq;
+   if (cq<qvtrim_qmin) {
+	   i3bw=i;
+	   if (i5bw<0) i5bw=i;
+   }
+ }
+ qavg=((double)qsum)/winlen;
+ if (iround(qavg)<qvtrim_qmin) {
+	 //propose 5' trimming by qv
+	 qi5=i3bw+1;
+ }
+ else { okfound=true; }
+ //now scan the rest of the read
+ if (okfound) i5bw=-1;
+ for (int i=1;i<=qvs.length()-winlen;i++) {
+   if (i5bw<i) i5bw=-1;
+   qsum -= qvs[i-1]-qv_phredtype;
+   int inew=i+winlen-1;
+   int qvnew=qvs[inew]-qv_phredtype;
+   if (qvnew<qvtrim_qmin) {
+      if (i5bw<0) i5bw=inew;
+      i3bw=inew;
+   }
+   qsum += qvnew;
+   //if (qilow<i && qvnew<qvtrim_qmin) qilow=inew;
+   qavg=((double)qsum)/winlen;
+   if (qavg<qvtrim_qmin) { //bad qv window
+	 if (okfound) {
+		 //trimming 3' now
+		 qi3=i5bw-1;
+	     break;
+	 } else {
+		 //still trimming 5', shame
+		 qi5=i3bw+1;
+		 if (qvs.length()-qi5<min_read_len)
+			 break;
+	 }
+   }
+   else okfound=true;
+ } //for each sliding window
+ if (!okfound) {
+	 //fatal trimming at 5' end
+	 l5=qi5;
+	 return true;
+ }
+ l5=qi5;
+ l3=qi3;
 }
 
 if (qvtrim_max>0) {
   if (qvs.length()-1-l3>qvtrim_max) l3=qvs.length()-1-qvtrim_max;
-  //if (l5>qvtrim_max) l5=qvtrim_max;
+  if (l5>qvtrim_max) l5=qvtrim_max;
   }
 return (l5>0 || l3<qvs.length()-1);
 }
