@@ -1,4 +1,4 @@
-#define VERSION "0.9.6"
+#define VERSION "0.9.7"
 #include "GArgs.h"
 #include "GStr.h"
 #include "GHash.hh"
@@ -47,7 +47,7 @@ Options:\n\
     (e.g. -3 TCGTATGCCGTCTTCTGCTTG)\n\
 -A  disable polyA/T trimming (enabled by default)\n\
 -B  trim polyA/T at both ends (default: only poly-A at 3' end, poly-T at 5')\n\
--O  only reads affected by trimming will be printed\n\
+-O  output only reads affected by trimming (discard clean reads!)\n\
 -y  minimum length of poly-A/T run to remove (6)\n\
 -q  trim read ends where the quality value drops below <minq>\n\
 -w  for -q, sliding window size for calculating avg. quality (default 6)\n\
@@ -57,6 +57,8 @@ Options:\n\
     than this, the read will be discarded (trashed)(default: 16)\n\
 -r  write a \"trimming report\" file listing the affected reads with a list\n\
     of trimming operations\n\
+-s  for paired reads, use -s1 or -s2 in order to prevent a mate (1 or 2) from\n\
+	any trimming, but discard pairs which have the other mate trashed\n\
 --aidx option can only be given with -r and -f options and it makes all the \n\
 	vector/adapter trimming operations encoded as a,b,c,.. instead of V,\n\
 	corresponding to the order of adapter sequences in the -f file\n\
@@ -121,7 +123,8 @@ int adapter_idx=0;
 int min_read_len=16;
 int num_cpus=1; // -p option
 int readBufSize=200; //how many reads to fetch at a time (useful for multi-threading)
-
+int shieldMate=0; //-s option, shield a mate from trimming but discard the pair
+                   //if the other mate gets trashed
 double max_perc_N=5.0;
 double perc_lenN=12.0; // incremental distance from ends, in percentage of read length
           // where N-trimming is allowed (default:12 %) (autolimited to 20)
@@ -436,7 +439,10 @@ struct CTrimHandler {
     bool fetchReads();
 	void flushReads();
 
-    void writeRead(RData& rd, RData& rd2);
+    void writeRead(RData& rd, RData* rd2);
+       //writes the output read/pair after processing
+       //also implements pair survival decision logic
+
 	bool nextRead(RData* & rdata, RData* & rdata2);
 	bool processRead();
 
@@ -485,7 +491,7 @@ void convertPhred(char* q, int len);
 void convertPhred(GStr& q);
 
 int main(int argc, char * const argv[]) {
-  GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=outdir=dmask;aidx;showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:P:q:f:w:t:o:z:a:y:");
+  GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=outdir=dmask;aidx;showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:s:P:q:f:w:t:o:z:a:y:");
   int e;
   if ((e=args.isError())>0) {
       GMessage("%s\nInvalid argument: %s\n", USAGE, argv[e]);
@@ -535,6 +541,13 @@ int main(int argc, char * const argv[]) {
   if (!s.is_empty()) {
      qvtrim_max=s.asInt();
      }
+  s=args.getOpt('s');
+  if (!s.is_empty()) {
+	  shieldMate=s.asInt();
+	  if (shieldMate<=0 or shieldMate>2) {
+		  GError("Error: -s option can only have value 1 or 2\n");
+	  }
+  }
   s=args.getOpt("match");
   if (!s.is_empty())
 	    match_reward=s.asInt();
@@ -698,7 +711,8 @@ int main(int argc, char * const argv[]) {
     if (f_in2!=NULL) {
        fq2=new GLineReader(f_in2);
        paired_reads=true;
-       }
+    }
+
     RInfo rinfo(f_out, f_out2, &fq, fq2);
     rinfo.infname=infname;
     rinfo.infname2=infname2;
@@ -1687,29 +1701,17 @@ void CTrimHandler::flushReads() {
 		bool trimmed=(rd.trashcode>0);
 		if (rd.trashcode>0 && trimReport)
 			trim_report(rd);
-		RData rd2;
-		RData *rd2p=&rd2;
-		if (rinfo->fq2 && rbuf2.Count()>i) {
+		RData *rd2p=NULL;
+		if (rinfo->fq2 && rbuf2.Count()>i) { //paired reads
 			rd2p = & (rbuf2[i]);
-		}
-		if (!rd2p->seq.is_empty() && rd2p->trashcode>0 && trimReport) {
-			trim_report(*rd2p, 1);
-			trimmed=true;
-		}
-		//decide what to do with this pair and print rd2.seq if any read in the pair makes it
-		/*
-		if (pairedOutput) {
-			if (rd.trashcode>1 && rd2p->trashcode<=1) {
-				rd.trashcode=1; //rescue read
-			}
-			else if (rd.trashcode<=1 && rd2p->trashcode>1) {
-				rd2p->trashcode=1; //rescue mate
+			if (!rd2p->seq.is_empty() && rd2p->trashcode>0) {
+				if (trimReport) trim_report(*rd2p, 1);
+				trimmed=true;
 			}
 		}
-		*/
 		if (!doCollapse) {
 		  if ((onlyTrimmed && trimmed) || !onlyTrimmed )
-		      writeRead(rd, *rd2p);
+		      writeRead(rd, rd2p);
 		}
 	 }
 	 updateCounts();
@@ -2050,22 +2052,38 @@ void write1Read(FILE* fout, RData& rd, int counter) {
     }
 }
 
-void CTrimHandler::writeRead(RData& rd, RData& rd2) {
+void CTrimHandler::writeRead(RData& rd, RData* rd2) {
+    //output the read/pair after processing
+    //also implements pair survival decision logic
 #ifndef NOTHREADS
 	GLockGuard<GFastMutex> guard(writeMutex);
 #endif
 
 	if (show_Trim) { outcounter++; return; }
-	bool writePair=false;
-	if (pairedOutput && (rd.trashcode<=1 || rd2.trashcode<=1))
-		 writePair=true;
-	if (rinfo->f_out && (writePair || rd.trashcode<=1)) {
+	bool write1=false;
+	bool write2=false;
+	if (pairedOutput && rd2!=NULL) {
+		//paired reads output
+		if (shieldMate==1) { //read2 decides
+			write1=write2=(rd2->trashcode<=1);
+		}
+		else if (shieldMate==2) {
+			write1=write2=(rd.trashcode<=1);
+		} else { //default pair rescue policy
+			write1=write2=(rd.trashcode<=1 || rd2->trashcode<=1);
+		}
+	}
+	else {
+		write1=(rd.trashcode<=1);
+		write2=(rd2!=NULL && rd2->trashcode<=1);
+	}
+	if (rinfo->f_out && write1) {
 		outcounter++;
 		write1Read(rinfo->f_out, rd, outcounter);
 	}
-	if (rinfo->f_out2 && (writePair || rd2.trashcode<=1))  {
+	if (rinfo->f_out2 && write2)  {
 		if (!pairedOutput) outcounter++;
-		write1Read(rinfo->f_out2, rd2, outcounter);
+		write1Read(rinfo->f_out2, *rd2, outcounter);
 	}
 }
 
@@ -2292,6 +2310,8 @@ void setupFiles(FILE*& f_in, FILE*& f_in2, FILE*& f_out, FILE*& f_out2,
  s.startTokenize(",:");
  s.nextToken(infname);
  bool paired=s.nextToken(infname2);
+ if (!paired && shieldMate>0)
+	 GError("Error: option -s requires paired reads.\n");
  if (fileExists(infname.chars())==0)
     GError("Error: cannot find file %s!\n",infname.chars());
  GStr fname(getFileName(infname.chars()));
@@ -2312,7 +2332,8 @@ void setupFiles(FILE*& f_in, FILE*& f_in2, FILE*& f_out, FILE*& f_out2,
    }
  f_out=prepOutFile(infname, pocmd);
  if (!paired) return;
- if (doCollapse) GError("Error: sorry, -C option cannot be used with paired reads!\n");
+ if (doCollapse) GError("Error: -C option cannot be used with paired reads!\n");
+
  // ---- paired reads:-------------
  if (fileExists(infname2.chars())==0)
      GError("Error: cannot find file %s!\n",infname2.chars());
@@ -2366,35 +2387,35 @@ void CTrimHandler::updateTrashCounts(RData& rd) {
 }
 
 bool CTrimHandler::processRead() {
-	//GStr rseq, rqv, seqid, seqinfo;
-	//GStr rseq2, rqv2, seqid2, seqinfo2;
 	RData* rd=NULL;
-	RData* rd2=NULL;
+	RData* rd2=NULL; //mate data, if any
 	if (nextRead(rd, rd2)) {
-		rd->trashcode=process_read(*rd);
-		//trashcode: 0 if the read was not trimmed at all and it's long enough
-		//       1 if it was just trimmed but survived,
-		//       >1 (=trash code character ) if it was trashed for any reason
+		if (shieldMate!=1) {
+			rd->trashcode=process_read(*rd);
+			//trashcode: 0 if the read was not trimmed at all and it's long enough
+			//       1 if it was just trimmed but survived,
+			//       >1 (=trash code character ) if it was trashed for any reason
 #ifdef TRIMDEBUG
-		if (rd->trim5>0 || rd->trim3<rd->seq.length()-1) {
-			char tc=(rd->trashcode>32)? rd->trashcode : ('0'+rd->trashcode);
-			GMessage("####> Trim code [%c] ( trim5=%d, trim3=%d): \n",tc, rd->trim5,rd->trim3);
-			showTrim(*rd);
-		}
-		else {
-			GMessage("####> No trimming for this read.\n");
-		}
+			if (rd->trim5>0 || rd->trim3<rd->seq.length()-1) {
+				char tc=(rd->trashcode>32)? rd->trashcode : ('0'+rd->trashcode);
+				GMessage("####> Trim code [%c] ( trim5=%d, trim3=%d): \n",tc, rd->trim5,rd->trim3);
+				showTrim(*rd);
+			}
+			else {
+				GMessage("####> No trimming for this read.\n");
+			}
 #endif
-		if (show_Trim) {
-			showTrim(*rd);
-		}
-		if (rd->trim5>0) {
-			b_trim5+=rd->trim5;
-			num_trim5++;
-		}
-		if (rd->trim3>0) {
-			b_trim3+=rd->trim3;
-			num_trim3++;
+			if (show_Trim) {
+				showTrim(*rd);
+			}
+			if (rd->trim5>0) {
+				b_trim5+=rd->trim5;
+				num_trim5++;
+			}
+			if (rd->trim3>0) {
+				b_trim3+=rd->trim3;
+				num_trim3++;
+			}
 		}
 		if (rinfo->fq2!=NULL && rd2!=NULL) { //paired
 			if (!disableMateNameCheck && rd->rid.length()>4 && rd2->rid.length()>=rd->rid.length()) {
@@ -2403,16 +2424,18 @@ bool CTrimHandler::processRead() {
 							rd->rid.chars(), rd2->rid.chars(), rinfo->infname.chars(), rinfo->infname2.chars());
 				}
 			}
-			rd2->trashcode=process_read(*rd2);
-			if (rd2->trim5>0) {
-				b_trim5+=rd2->trim5;
-				num_trim5++;
+			if (shieldMate!=2) {
+				rd2->trashcode=process_read(*rd2);
+				if (rd2->trim5>0) {
+					b_trim5+=rd2->trim5;
+					num_trim5++;
+				}
+				if (rd2->trim3>0) {
+					b_trim3+=rd2->trim3;
+					num_trim3++;
+				}
+				updateTrashCounts(*rd2);
 			}
-			if (rd2->trim3>0) {
-				b_trim3+=rd2->trim3;
-				num_trim3++;
-			}
-			updateTrashCounts(*rd2);
 		} //paired
 		updateTrashCounts(*rd);
 		return true;
