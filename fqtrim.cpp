@@ -57,18 +57,18 @@ Options:\n\
     than this, the read will be discarded (trashed)(default: 16)\n\
 -r  write a \"trimming report\" file listing the affected reads with a list\n\
     of trimming operations\n\
--s  for paired reads, use -s1 or -s2 in order to prevent a mate (1 or 2) from\n\
-	any trimming, but discard pairs which have the other mate trashed\n\
+-s1/-s2:  for paired reads, one of the reads (1 or 2) is not being processed\n\
+    (no attempt to trim it) but the pair is discarded if the other read is\n\
+    trashed by the trimming process\n\
 --aidx option can only be given with -r and -f options and it makes all the \n\
-	vector/adapter trimming operations encoded as a,b,c,.. instead of V,\n\
-	corresponding to the order of adapter sequences in the -f file\n\
+    vector/adapter trimming operations encoded as a,b,c,.. instead of V,\n\
+    corresponding to the order of adapter sequences in the -f file\n\
 -T  write the number of bases trimmed at 5' and 3' ends after the read names\n\
     in the FASTA/FASTQ output file(s)\n\
 -D  pass reads through a low-complexity (dust) filter and discard any read\n\
     that has over 50% of its length masked as low complexity\n\
 --dmask option is the same with -D but fqtrim will actually mask the low \n\
     complexity regions with Ns in the output sequence\n\
-    of low-complexity sequence detected in the reads\n\
 -C  collapse duplicate reads and append a _x<N>count suffix to the read\n\
     name (where <N> is the duplication count)\n\
 -p  use <numcpus> CPUs (threads) on the local machine\n\
