@@ -26,6 +26,6 @@ cd ..
 pwd
 echo "tar cvfz $binpack.tar.gz $binpack"
 tar cvfz $binpack.tar.gz $binpack
-echo "On igmX machines you can also update the web files:"
-echo "cp $binpack.tar.gz $srcpack.tar.gz  ~/html/software/fqtrim/dl/"
+echo "Update the web files:"
+echo "scp $binpack.tar.gz $srcpack.tar.gz  salz1:~/html/software/fqtrim/dl/"
 echo "perl -i -pe 's/fqtrim\-[\d\.]+/fqtrim-$ver./g' ~/html/software/fqtrim/index.shtml"
