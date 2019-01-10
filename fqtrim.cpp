@@ -490,7 +490,7 @@ void setupFiles(FILE*& f_in, FILE*& f_in2, FILE*& f_out, FILE*& f_out2,
 void convertPhred(char* q, int len);
 void convertPhred(GStr& q);
 
-int main(int argc, char * const argv[]) {
+int main(int argc, char* argv[]) {
   GArgs args(argc, argv, "pid5=pid3=mism=ntrimdist=match=XDROP=outdir=dmask;aidx;showtrim;YQDCRVABOTMl:d:3:5:m:n:r:p:s:P:q:f:w:t:o:z:a:y:");
   int e;
   if ((e=args.isError())>0) {

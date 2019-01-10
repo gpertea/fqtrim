@@ -1,9 +1,7 @@
 #ifndef G_BASE_DEFINED
 #define G_BASE_DEFINED
-//#ifndef _POSIX_SOURCE
-////mostly for MinGW;breaks mkdtemp and possibly other functions on OS X
-//#define _POSIX_SOURCE
-//#endif
+#define GCLIB_VERSION "0.10.3"
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -15,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <stdint.h>
+#include <stdarg.h>
 
 #if defined __WIN32__ || defined WIN32 || defined _WIN32 || defined _WIN32_
   #ifndef __WIN32__
@@ -212,18 +211,16 @@ void GMessage(const char* format,...);// Log message to stderr
 // Assert failed routine:- usually not called directly but through GASSERT
 void GAssert(const char* expression, const char* filename, unsigned int lineno);
 
-// ****************** string manipulation *************************
-char *Gstrdup(const char* str);
-//duplicate a string by allocating a copy for it and returning it
+// ****************** basic string manipulation *************************
+char *Gstrdup(const char* str, int xtracap=0); //string duplication with extra capacity added
+//duplicate a string by allocating a copy for it (+xtracap heap room) and returning the new pointer
+//caller is responsible for deallocating the returned pointer!
+
 char* Gstrdup(const char* sfrom, const char* sto);
 //same as GStrdup, but with an early termination (e.g. on delimiter)
 
 char* Gsubstr(const char* str, char* from, char* to=NULL);
 //extracts a substring, allocating it, including boundaries (from/to)
-
-int strsplit(char* str, char** fields, int maxfields, const char* delim);
-int strsplit(char* str, char** fields, int maxfields, const char delim);
-int strsplit(char* str, char** fields, int maxfields); //splits by tab or space
 
 char* replaceStr(char* &str, char* newvalue);
 
@@ -253,10 +250,10 @@ char* rstrchr(char* str, char ch);
 char* strchrs(const char* s, const char* chrs);
 //strchr but with a set of chars instead of only one
 
-char* rstrfind(const char* str, const char *substr); 
+char* rstrfind(const char* str, const char *substr);
 // like rindex() but for strings;  right side version of strstr()
 
-char* reverseChars(char* str, int slen=0); //in place reversal of string 
+char* reverseChars(char* str, int slen=0); //in place reversal of string
 
 char* rstrstr(const char* rstart, const char *lend, const char* substr);
 /*the reversed, rightside equivalent of strstr: starts searching
@@ -277,7 +274,13 @@ bool startsiWith(const char* s, const char* prefix); //case insensitive
 
 bool endsWith(const char* s, const char* suffix);
 //Note: returns true if suffix is empty string, but false if it's NULL
+bool endsiWith(const char* s, const char* suffix); //case insensitive version
 
+//like endsWith but also remove the suffix if found
+//returns true if the given suffix was found and removed
+bool trimSuffix(char* s, const char* suffix);
+//case insensitive version:
+bool trimiSuffix(char* s, const char* suffix);
 
 // ELF hash function for strings
 int strhash(const char* str);
@@ -494,10 +497,28 @@ template<class OBJ> class GDynArray {
     void Reset() {// fast clear array WITHOUT deallocating it
     	fCount = 0;
     }
-	//pointer getptr() { return (pointer) fArray; }
-	OBJ* operator()() { return fArray; }
+
+    OBJ* operator()() { return fArray; }
+
+    //use below to prevent freeing the fArray pointer
+    //could be handy for adopting stack objects (e.g. cheap dynamic strings)
+    void ForgetPtr() { byptr=true;  }
+    void DetachPtr() { byptr=true;  }
+
 };
 
+
+int strsplit(char* str, GDynArray<char*>& fields, const char* delim, int maxfields=MAX_INT);
+//splits a string by placing 0 where any of the delim chars are found, setting fields[] to the beginning
+//of each field (stopping after maxfields); returns number of fields parsed
+
+int strsplit(char* str, GDynArray<char*>& fields, const char delim, int maxfields=MAX_INT);
+//splits a string by placing 0 where the delim char is found, setting fields[] to the beginning
+//of each field (stopping after maxfields); returns number of fields parsed
+
+int strsplit(char* str, GDynArray<char*>& fields, int maxfields=MAX_INT); //splits by tab or space
+//splits a string by placing 0 where tab or space is found, setting fields[] to the beginning
+//of each field (stopping after maxfields); returns number of fields parsed
 
 //--------------------------------------------------------
 // ************** simple line reading class for text files
@@ -594,8 +615,10 @@ void writeFasta(FILE *fw, const char* seqid, const char* descr,
 bool parseNumber(char* &p, double& v);
 bool parseDouble(char* &p, double& v); //just an alias for parseNumber
 
-bool parseInt(char* &p, int& i);
-bool parseUInt(char* &p, uint& i);
+bool strToInt(char* p, int& i);
+bool strToUInt(char* p, uint& i);
+bool parseInt(char* &p, int& i); //advance pointer p after the number
+bool parseUInt(char* &p, uint& i); //advance pointer p after the number
 bool parseHex(char* &p,  uint& i);
 
 #endif /* G_BASE_DEFINED */

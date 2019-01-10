@@ -83,17 +83,18 @@ else
   #-L${BAM}
 endif
 
-###----- generic build rule
-
-%.o : %.cpp
-	${CC} ${CFLAGS} -c $< -o $@
-
 OBJS = ${GDIR}/GBase.o ${GDIR}/gdna.o ${GDIR}/GArgs.o ${GDIR}/GStr.o \
  ${GDIR}/GAlnExtend.o
 
 ifndef NOTHREADS
  OBJS += ${GDIR}/GThreads.o 
 endif
+
+
+###----- generic build rule
+
+%.o : %.cpp
+	${CC} ${CFLAGS} -c $< -o $@
 
 .PHONY : all release trimdebug fulldebug nothreads
 all: fqtrim
