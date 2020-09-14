@@ -1,4 +1,4 @@
-GDIR := ./gclib
+GDIR := ../gclib
 
 SEARCHDIRS := -I${GDIR}
 
